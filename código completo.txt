@@ -1,0 +1,454 @@
+Okay, aquí tienes la estructura completa de archivos propuesta y el código para cada uno de los módulos, incluyendo ejemplos de los archivos de configuración y datos.
+Vamos a seguir la estructura de directorios que definimos:
+project_root/
+│
+├── src/
+│   ├── __init__.py         # Paquete src
+│   │
+│   ├── config/           # Módulo de configuración
+│   │   ├── __init__.py
+│   │   └── config_manager.py
+│   │
+│   ├── data_acquisition/ # Módulo de descarga (PLACEHOLDER para POC local)
+│   │   ├── __init__.py
+│   │   └── downloader.py
+│   │
+│   ├── audio_processing/ # Módulo de procesamiento Whisper (PLACEHOLDER para POC inicial sin audio)
+│   │   ├── __init__.py
+│   │   └── whisper_processor.py
+│   │
+│   ├── data_preparation/ # Módulo de carga y preparación de datos
+│   │   ├── __init__.py
+│   │   └── data_loader.py
+│   │
+│   ├── evaluation/       # Módulo de lógica de evaluación (LLM)
+│   │   ├── __init__.py
+│   │   ├── item_rules.py       # Reglas e estructura de evaluación
+│   │   ├── evaluator.py        # Llamadas al LLM
+│   │   └── postprocessor.py    # Lógica post-evaluación
+│   │
+│   ├── results/          # Módulo para guardar resultados
+│   │   ├── __init__.py
+│   │   └── results_handler.py
+│   │
+│   └── main_workflow.py    # Orquestador principal
+│
+├── data/                 # Datos (local en POC)
+│   ├── raw_calls/          # Audios brutos (Vacío en POC sin descarga real)
+│   ├── raw_transcripts/    # Transcripciones iniciales (Vacío en POC sin descarga real)
+│   ├── whisper_transcripts/# Transcripciones Whisper (Usaremos dummy aquí)
+│   ├── k_plus_data/        # Datos K+ por llamada (Usaremos dummy aquí)
+│   └── processed/          # (Opcional)
+│
+├── config/               # Archivos de configuración
+│   └── settings.yaml
+│
+├── results/              # Resultados
+│   └── evaluation_output.json # Ejemplo
+│
+├── scripts/              # Scripts de ayuda
+│   └── run_pipeline.py     # Script simple para ejecutar main_workflow
+│
+├── .env                  # Variables de entorno (sensible)
+├── requirements.txt      # Dependencias
+└── README.md             # Documentación
+
+Contenido de los Archivos:
+project_root/.env
+# Variables de entorno para configuración sensible
+# Usar con `python-dotenv`
+
+AZURE_OPENAI_ENDPOINT="YOUR_AZURE_ENDPOINT"
+AZURE_OPENAI_KEY="YOUR_AZURE_KEY"
+# Otras credenciales API o claves sensibles
+# DATA_SOURCE_API_KEY="..."
+
+Notas:
+ * Este archivo no debe subirse a repositorios públicos.
+ * Contiene información sensible. python-dotenv ayuda a cargarlas como variables de entorno al inicio de la aplicación.
+project_root/requirements.txt
+openai>=1.0.0 # La versión exacta puede variar
+python-dotenv>=1.0.0
+PyYAML>=6.0
+# Si usas pandas para K+ data:
+# pandas>=2.0.0
+
+Notas:
+ * Lista las dependencias necesarias.
+ * Instalar con pip install -r requirements.txt.
+project_root/config/settings.yaml
+# Configuración general del proyecto
+
+# Configuración Azure OpenAI (no sensible, solo nombres/versiones)
+openai:
+  deployment_name: "gpt-4o" # Nombre del deployment en Azure
+  api_version: "2024-02-15-preview" # Versión API
+
+# Rutas de directorios (relativas a project_root o absolutas)
+data_paths:
+  base: "data/"
+  raw_calls: "data/raw_calls/"
+  raw_transcripts: "data/raw_transcripts/"
+  whisper_transcripts: "data/whisper_transcripts/"
+  k_plus_data: "data/k_plus_data/"
+  results: "results/"
+
+# Configuración del pipeline
+pipeline:
+  use_whisper: true # true para usar transcripciones Whisper, false para raw
+  items_to_evaluate: # Puedes definir aquí qué grupos/ítems evaluar (de EVALUATION_STRUCTURE)
+    - "inicio_llamada_group"
+    - "item_17_individual"
+    - "item_20_individual"
+    - "item_26_individual"
+  # Puedes añadir aquí otros flags o parámetros para controlar el workflow
+
+# Configuración de la fuente de datos (PLACEHOLDER)
+data_source:
+  api_endpoint: "http://your-call-system/api/"
+  # ... otros parámetros de conexión
+
+Notas:
+ * Configuración no sensible.
+ * Cargado por config_manager.py usando PyYAML.
+project_root/data/whisper_transcripts/call_001.txt
+Agente: Buenos días, le llamo de EOS Spain, soy Juan Rodríguez. ¿Hablo con el Sr. Juan Pérez García? Deudor: Sí, dígame. Agente: Para confirmar su identidad, ¿podría indicarme su DNI completo? Deudor: Solo le doy los 3 últimos números, 789A. Agente: Entendido, y su fecha de nacimiento. Deudor: 01/01/1980. Agente: Gracias. Y para confirmar sus datos de contacto, ¿su dirección es C/ Falsa 123? Deudor: Sí. Agente: ¿Su teléfono 555-1234? Deudor: Sí. Agente: Perfecto, todo correcto. ¿Dispone de email para enviarle información? Deudor: No uso email. Agente: Ok. Queríamos informarle sobre...
+
+Notas:
+ * Ejemplo de un archivo de transcripción (generado por Whisper o la fuente inicial).
+ * Un archivo por llamada, nombrado de forma consistente (ej. [call_id].txt).
+project_root/data/k_plus_data/call_001.json
+{
+  "call_id": "call_001",
+  "call_type": "Saliente",
+  "duration": 5.5,
+  "k_plus_incident": false,
+  "intervener_present_in_3way": false,
+  "lawyer_personado": false,
+  "corresponds_update": true,
+  "is_authorised_express": false,
+  "k_plus_data_snapshot": {
+    "direccion_valido": "C/ Falsa 123",
+    "telefonos_validos": ["555-1234"],
+    "emails_validos": ["test@example.com"],
+    "fecha_nacimiento": "1980-01-01",
+    "dni_nie_completo": "12345678A",
+    "abogado_personado": false,
+    "tiene_flag_argumentario_prescripcion": false,
+    "fecha_flag_argumentario_prescripcion": null,
+    "estado_registro_direccion_nueva_hablada_en_call": null,
+    "estado_registro_telefono_nuevo_hablado_en_call": null,
+    "estado_registro_email_nuevo_hablado_en_call": "No Registrado", # Simula que el agente mencionó registrarlo pero no se hizo
+    "numero_telefonos_total_en_k": 1,
+    "numero_emails_total_en_k": 1,
+    "datos_contractuales": {
+      "cedente": "Banco Y",
+      "producto": "Préstamo",
+      "importe_pendiente": 2000.00
+    }
+  }
+  // Puedes añadir otros metadatos aquí si es necesario
+}
+
+Notas:
+ * Ejemplo de archivo de datos estructurados de K+ para una llamada.
+ * Un archivo por llamada, nombrado de forma consistente (ej. [call_id].json).
+ * La estructura k_plus_data_snapshot contiene todos los campos necesarios para la evaluación de cualquier ítem que los requiera.
+src/__init__.py
+# Este archivo marca el directorio src como un paquete Python.
+
+src/config/__init__.py
+# Este archivo marca el directorio src/config como un paquete Python.
+from .config_manager import ConfigManager # Exponer la clase principal
+
+src/config/config_manager.py
+import os
+import yaml
+from dotenv import load_dotenv
+
+class ConfigManager:
+    """
+    Gestiona la carga de configuración desde variables de entorno y archivo YAML.
+    """
+    _instance = None # Para implementar Singleton
+    _config = {}
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ConfigManager, cls).__new__(cls)
+            cls._instance._load_config() # Cargar config al crear la instancia
+        return cls._instance
+
+    def _load_config(self):
+        """Carga la configuración desde .env y settings.yaml."""
+        # Cargar variables de entorno desde .env si existe
+        load_dotenv()
+        print("Environment variables loaded from .env")
+
+        # Cargar configuración desde archivo YAML
+        config_path = os.path.join(os.path.dirname(__file__), '../../config/settings.yaml')
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self._config = yaml.safe_load(f)
+            print(f"Configuration loaded from {config_path}")
+        except FileNotFoundError:
+            print(f"Warning: Configuration file not found at {config_path}. Using defaults or environment variables only.")
+            self._config = {}
+        except yaml.YAMLError as e:
+            print(f"Error loading YAML configuration from {config_path}: {e}")
+            self._config = {} # Cargar configuración vacía en caso de error
+
+    def get(self, key: str, default=None):
+        """Obtiene un valor de configuración por clave (permite acceder a diccionarios anidados con '.')."""
+        keys = key.split('.')
+        value = self._config
+        try:
+            for k in keys:
+                value = value[k]
+            return value
+        except (KeyError, TypeError):
+            return default
+
+    def get_env(self, key: str, default=None):
+        """Obtiene un valor directamente desde las variables de entorno."""
+        return os.getenv(key, default)
+
+# Instancia Singleton para fácil acceso
+config_manager = ConfigManager()
+
+# Ejemplo de cómo otros módulos accederían:
+# from src.config import config_manager
+# openai_key = config_manager.get_env("AZURE_OPENAI_KEY")
+# data_dir = config_manager.get("data_paths.base")
+
+src/data_acquisition/__init__.py
+# Este archivo marca el directorio src/data_acquisition como un paquete Python.
+from .downloader import download_calls # Exponer funciones clave
+
+src/data_acquisition/downloader.py
+import os
+# Importar config_manager para obtener rutas de destino, credenciales de fuente de datos
+from src.config import config_manager
+
+def download_calls(call_ids: list = None, date_range: tuple = None):
+    """
+    PLACEHOLDER: Simula la descarga de llamadas y transcripciones iniciales.
+    En una implementación real, se conectaría a la fuente de datos de EOS Spain.
+    """
+    raw_calls_dir = config_manager.get("data_paths.raw_calls")
+    raw_transcripts_dir = config_manager.get("data_paths.raw_transcripts")
+
+    print("\n--- Data Acquisition (Simulation) ---")
+    print(f"Simulating download of calls into '{raw_calls_dir}' and initial transcripts into '{raw_transcripts_dir}'...")
+
+    # Asegurar que los directorios de destino existen
+    os.makedirs(raw_calls_dir, exist_ok=True)
+    os.makedirs(raw_transcripts_dir, exist_ok=True)
+
+    # Lógica real de descarga aquí...
+    # Conectarse al sistema de origen
+    # Consultar llamadas (por ID o rango de fechas)
+    # Descargar archivos .wav/.mp3 y .txt iniciales
+    # Guardar en las rutas especificadas
+
+    print("Download simulation complete.")
+    # En una implementación real, podría devolver una lista de IDs o rutas descargadas
+    return {"status": "simulated_success"}
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.data_acquisition import download_calls
+# download_calls(date_range=("2023-01-01", "2023-01-31"))
+
+src/audio_processing/__init__.py
+# Este archivo marca el directorio src/audio_processing como un paquete Python.
+from .whisper_processor import process_audio_for_transcription # Exponer funciones clave
+
+src/audio_processing/whisper_processor.py
+import os
+# Importar config_manager para obtener config API y rutas de datos
+from src.config import config_manager
+# Importar AzureOpenAI client (configurado en el scope global o en un módulo específico de API clients)
+from openai import AzureOpenAI # Asegurarse de que el cliente está configurado con credenciales y endpoint
+
+# Configurar el cliente OpenAI aquí o importarlo si ya está configurado globalmente
+# Esto asume que AZURE_OPENAI_ENDPOINT y AZURE_OPENAI_KEY están en .env o variables de entorno
+openai_client = AzureOpenAI(
+    azure_endpoint=config_manager.get_env("AZURE_OPENAI_ENDPOINT"),
+    api_key=config_manager.get_env("AZURE_OPENAI_KEY"),
+    api_version=config_manager.get("openai.api_version")
+)
+
+
+def process_audio_file(audio_filepath: str, output_dir: str):
+    """
+    Procesa un archivo de audio usando la API de Whisper y guarda la transcripción.
+    PLACEHOLDER: En la POC inicial podrías simplemente copiar la transcripción raw si no usas Whisper aún.
+    """
+    print(f"Processing audio file with Whisper: {audio_filepath}...")
+    try:
+        # Lógica real de llamada a la API de Whisper
+        # with open(audio_filepath, "rb") as audio_file:
+        #     transcription = openai_client.audio.transcriptions.create(
+        #         model="whisper-1", # O el nombre de tu deployment Whisper en Azure si es diferente
+        #         file=audio_file
+        #     )
+        # transcript_text = transcription.text
+
+        # --- SIMULACIÓN para POC sin audio real/API ---
+        # En la POC, si no tienes Whisper configurado/activo, podrías:
+        # 1. Simplemente devolver un texto dummy
+        # transcript_text = f"Simulated Whisper transcript for {os.path.basename(audio_filepath)}"
+        # 2. O leer la transcripción inicial raw si existe (requiere lógica de carga aquí o pasarla como input)
+        # Esto complica este módulo, mejor que data_loader decida qué transcripción usar.
+        # Así que, para la simulación pura de Whisper processing:
+        transcript_text = f"Simulated high-quality transcript for {os.path.basename(audio_filepath)}. [Whisper Processed]"
+        print(f"Simulated Whisper output: {transcript_text[:100]}...") # Mostrar inicio del texto simulado
+        # --- FIN SIMULACIÓN ---
+
+
+        # Determinar el nombre del archivo de salida (ej. usando el nombre original del archivo de audio)
+        base_filename = os.path.basename(audio_filepath)
+        call_id = os.path.splitext(base_filename)[0] # Asume nombre archivo es call_id
+        output_filepath = os.path.join(output_dir, f"{call_id}.txt")
+
+        # Guardar la transcripción
+        os.makedirs(output_dir, exist_ok=True)
+        with open(output_filepath, "w", encoding="utf-8") as f:
+            f.write(transcript_text)
+
+        print(f"Transcription saved to {output_filepath}")
+        return output_filepath # Retornar la ruta del archivo generado
+
+    except Exception as e:
+        print(f"Error processing audio file {audio_filepath} with Whisper: {e}")
+        return None # Retornar None o lanzar excepción si falla
+
+def process_audio_batch(audio_file_list: list):
+    """Procesa una lista de archivos de audio."""
+    whisper_output_dir = config_manager.get("data_paths.whisper_transcripts")
+    processed_files = []
+    print("\n--- Audio Processing (Whisper) ---")
+    for audio_filepath in audio_file_list:
+        output_filepath = process_audio_file(audio_filepath, whisper_output_dir)
+        if output_filepath:
+            processed_files.append(output_filepath)
+    print("Audio processing batch complete.")
+    return processed_files
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.audio_processing import process_audio_for_transcription
+# audio_files_to_process = ["data/raw_calls/call_001.wav", ...] # Obtener esta lista de donde los descargaste
+# process_audio_for_transcription.process_audio_batch(audio_files_to_process)
+
+src/data_preparation/__init__.py
+# Este archivo marca el directorio src/data_preparation como un paquete Python.
+from .data_loader import load_call_data_for_evaluation # Exponer función clave
+
+src/data_preparation/data_loader.py
+import os
+import json
+# Importar config_manager para obtener rutas de datos
+from src.config import config_manager
+from datetime import datetime, timedelta # Para lógica de fecha (ej. Ítem 5)
+
+def load_call_data_for_evaluation(call_id: str, use_whisper: bool = True):
+    """
+    Carga y prepara todos los datos necesarios para la evaluación de una sola llamada.
+
+    Args:
+        call_id (str): El ID único de la llamada.
+        use_whisper (bool): Si usar la transcripción de Whisper (True) o la raw (False).
+
+    Returns:
+        dict: Diccionario `call_data` con 'transcript' y 'call_metadata',
+              o None si los archivos necesarios no se encuentran.
+    """
+    print(f"\n--- Data Preparation (Loading) for call {call_id} ---")
+
+    data_paths = config_manager.get("data_paths")
+    transcript_dir = data_paths["whisper_transcripts"] if use_whisper else data_paths["raw_transcripts"]
+    k_plus_dir = data_paths["k_plus_data"]
+
+    # Cargar Transcripción
+    transcript_filepath = os.path.join(transcript_dir, f"{call_id}.txt")
+    transcript_content = None
+    try:
+        with open(transcript_filepath, 'r', encoding='utf-8') as f:
+            transcript_content = f.read()
+        print(f"Loaded transcript from: {transcript_filepath}")
+    except FileNotFoundError:
+        print(f"Error: Transcript file not found for call {call_id} at {transcript_filepath}")
+        return None # No se puede evaluar sin transcripción
+
+    # Cargar Metadatos y Datos de K+
+    metadata_filepath = os.path.join(k_plus_dir, f"{call_id}.json")
+    call_metadata = {}
+    try:
+        with open(metadata_filepath, 'r', encoding='utf-8') as f:
+            call_metadata = json.load(f)
+        print(f"Loaded metadata and K+ data from: {metadata_filepath}")
+
+        # --- Lógica de preparación adicional (ej. calcular si flag prescripción es reciente) ---
+        # Esto movimos del load_call_data anterior. Lo hacemos aquí al cargar.
+        today = datetime.now() # Usar fecha actual o pasar una de config si se necesita fija para pruebas
+        flag_date_str = call_metadata.get("k_plus_data_snapshot", {}).get("fecha_flag_argumentario_prescripcion")
+        is_flag_recent = False
+        if flag_date_str and flag_date_str != "N/A":
+            try:
+                flag_date = datetime.strptime(flag_date_str, "%Y-%m-%d")
+                if today - flag_date < timedelta(days=90): # Aproximadamente 3 meses
+                    is_flag_recent = True
+            except (ValueError, TypeError):
+                print(f"Warning: Could not parse prescription_flag_date {flag_date_str} for call {call_id}")
+        call_metadata["is_prescription_flag_recent"] = is_flag_recent
+        # --- Fin lógica preparación ---
+
+
+    except FileNotFoundError:
+        print(f"Warning: K+ data file not found for call {call_id} at {metadata_filepath}. Proceeding with limited metadata.")
+        # Continuar con metadatos mínimos si el archivo K+ no existe
+        call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}}
+    except json.JSONDecodeError:
+         print(f"Error decoding JSON from K+ data file {metadata_filepath} for call {call_id}. Proceeding with empty metadata.")
+         call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}}
+    except Exception as e:
+         print(f"An unexpected error occurred loading K+ data for call {call_id}: {e}. Proceeding with empty metadata.")
+         call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}}
+
+
+    # Ensamblar el diccionario final para evaluación
+    call_data = {
+        "transcript": transcript_content,
+        "call_metadata": call_metadata
+    }
+
+    print(f"Data loaded successfully for call {call_id}.")
+    return call_data
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.data_preparation import load_call_data_for_evaluation
+# call_id_to_process = "call_001"
+# call_data = load_call_data_for_evaluation(call_id_to_process, use_whisper=True)
+# if call_data:
+#    # Proceed with evaluation
+#    pass
+
+src/evaluation/__init__.py
+# Este archivo marca el directorio src/evaluation como un paquete Python.
+from .item_rules import ITEM_RULES, EVALUATION_STRUCTURE # Exponer reglas y estructura
+from .evaluator import evaluate_with_llm # Exponer la función de evaluación LLM
+from .postprocessor import apply_post_processing # Exponer la función de post-procesamiento
+
+src/evaluation/item_rules.py
+# Este archivo contiene la definición de las reglas de evaluación
+# y la estructura que define cómo se agrupan los ítems para la evaluación LLM.
+
+# --- Definición de Items y sus reglas (completo para los 10 ítems en scope) ---
+# COPIA AQUÍ EL CONTENIDO DEL DICCIONARIO 'ITEM_RULES' DEL PASO ANTERIOR
+# Asegúrate de que las reglas hagan referencia explícita a los campos
+# dentro de 'k_plus_data_snapshot' cuando sea necesario.
+ITEM_RULES = {
+    "1": { "name": "Saludo+Identificación (agente+empresa)", "complexity": "BAJO", "description": "...",
+           "rules_detail": """
+           Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+     
