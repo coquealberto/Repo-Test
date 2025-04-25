@@ -1,0 +1,300 @@
+Excelente, gracias por proporcionar los detalles de los ítems no críticos del bloque "Inicio Llamada". Esto nos permite integrar una parte más completa del flujo inicial del agente en la POC.
+Vamos a incorporar estos 5 ítems (1, 2, 3, 5, 7) a la estructura de código Python que definimos anteriormente.
+Actualizaciones Necesarias en el Código:
+ * ITEM_RULES Dictionary: Añadir las definiciones completas (name, complexity, description, prompt_template, rules_detail) para los ítems 1, 2, 3, 5, y 7.
+ * process_call Function: Actualizar la lista items_to_evaluate para incluir estos nuevos ítems.
+ * evaluate_item_with_llm Function: Actualizar la lógica para preparar prompt_data para estos nuevos ítems, extrayendo los metadatos necesarios de call_metadata (principalmente call_type y datos simulados sobre flags/fechas para Ítem 5).
+ * load_call_data Function: Añadir metadatos relevantes para los ítems 1, 2, 3, 5 y 7 a los diccionarios de call_metadata de las llamadas dummy (o leerlos de tus fuentes de datos reales). Por ejemplo, para Ítem 5, necesitarás datos sobre la "flag de Argumentario Prescripción" y su fecha. Para Ítem 7, datos sobre cuántos teléfonos/emails ya existen en K+.
+ * apply_post_processing Function: Revisar si las relaciones con otros ítems mencionadas para estos nuevos ítems (principalmente Ítem 5 -> 14, Ítem 7 -> 20/21) requieren alguna lógica de ajuste de resultados en la POC. Basado en las descripciones, la mayoría de estas relaciones definen dónde se penaliza algo (si aquí o en otro ítem) o se refieren a ítems (14, 21) que no están en el alcance de la POC, por lo que el post-procesamiento para estos ítems puede ser simple.
+Aquí tienes el código Python actualizado incluyendo los ítems 1, 2, 3, 5 y 7.
+import os
+import json
+from openai import AzureOpenAI # Asegúrate de tener la librería 'openai' instalada (pip install openai)
+
+# --- Configuración ---
+# Reemplaza con tus datos de configuración de Azure OpenAI o asegúrate de que las variables de entorno estén configuradas
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "YOUR_AZURE_ENDPOINT") # Ej: https://your-resource-name.openai.azure.com/
+AZURE_OPENAI_KEY = os.environ.get("AZURE_OPENAI_KEY", "YOUR_AZURE_KEY")
+AZURE_OPENAI_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o") # O el nombre de tu modelo desplegado
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+
+# --- Cliente de Azure OpenAI ---
+try:
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_KEY,
+        api_version=AZURE_OPENAI_API_VERSION
+    )
+    # Intenta una llamada simple para verificar la conexión si es necesario
+    # client.models.list()
+    print("Azure OpenAI client initialized successfully.")
+except Exception as e:
+    print(f"Error initializing Azure OpenAI client: {e}")
+    print("Please check your AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT_NAME, and AZURE_OPENAI_API_VERSION configuration.")
+    # Dependiendo de la severidad, podrías querer salir aquí
+    # exit()
+
+
+# --- Definición de Items y sus reglas ---
+# Añadimos los ítems 1, 2, 3, 5, 7 a los ítems críticos existentes
+ITEM_RULES = {
+    # Bloque 1: Inicio Llamada
+    "1": {
+        "name": "Saludo+Identificación (agente+empresa)",
+        "complexity": "BAJO",
+        "description": "Evalúa que el saludo y la identificación del agente sigan las pautas de la empresa.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 1: Saludo e Identificación (agente+empresa).
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 1):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "1",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación de por qué Pass, Fail o N/A, citando evidencia de la transcripción.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+        - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+        - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+        - Excepciones y otras consideraciones:
+          - Si agente solo indica su nombre, se acepta como correcto.
+          - Si se dice la frase pero diferente orden (sin alterar sentido), se acepta como correcto.
+        - Relación con otros ítems: Sin relación directa.
+        """
+    },
+    "2": {
+        "name": "Informar posible grabación llamada + GDPR",
+        "complexity": "BAJO",
+        "description": "Evalúa si se informa sobre la grabación y GDPR en llamadas salientes, callbacks, y situaciones específicas (RedSys, añadir persona).",
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 2: Información sobre Grabación y GDPR.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 2):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "2",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se informó o no, y si cumplió las reglas/excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca N/A para llamadas entrantes regulares donde no aplica.
+        """,
+        "rules_detail": """
+        - Informar siguiendo argumentario, en TODAS las llamadas salientes, incluidas callback.
+        - En pagos a través de RedSys es necesario informar cuando se va a parar la grabación y también cuando se reanuda.
+        - Cuando otra persona se añada a la conversación debemos identificarnos e informar de la grabación.
+        - Excepciones y otras consideraciones:
+          - Si el cliente interrumpe mientras está informando, no se valora (Pass).
+          - Se informa de la grabación y la política de privacidad, pero no con la frase exacta, se daría como correcto (Pass).
+          - Con empresas autorizadas con NDA no es necesario informar de grabación (Pass si es el caso, aunque no puedes verificar NDA solo con transcripción - asume Pass si se menciona "empresa autorizada" y no se informa, o marca N/A si los metadatos indican empresa con NDA).
+        - Relación con otros ítems: Sin relación directa.
+        """
+    },
+    "3": {
+        "name": "Identificación interlocutor (buscar confirmación)",
+        "complexity": "BAJO",
+        "description": "Evalúa si el agente busca la confirmación de que habla con la persona correcta, según tipo de llamada.",
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 3: Identificación del Interlocutor (buscar confirmación).
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 3):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada. El objetivo es ver si el agente VERIFICÓ que la persona que respondió es la que busca.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "3",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se buscó la confirmación correctamente o no, según reglas y excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        Se valora que el agente busque una confirmación de que está hablando con la persona por la que pregunta / cliente.
+        - Llamadas IN: Se debe solicitar que sea el interlocutor quien facilite su nombre y motivo. Si es cliente, pedir Nombre Completo, DNI y Fecha Nacimiento.
+        - Llamadas OUT: Se debe preguntar por interviniente con Nombre y Apellidos, y verificar que la persona RESPONDE afirmativamente a "¿Es usted?". No basta con "Sí", "Dígame", etc.
+        - Excepciones y otras consideraciones:
+          - Si el interlocutor en llamada IN referencia su deuda ("llamo por mi tarjeta"), NO es necesario el check "¿es usted?" (Pass).
+          - Llamadas IN: Si agente solicita nombre, apellidos, DNI ANTES de saber si es cliente, se penaliza.
+          - Llamadas IN: Si agente lee nombre/apellidos SIN antes solicitar que lo facilite el interlocutor, se penaliza.
+          - Penalizar solicitar 3 últimos dígitos DNI SIN negativa previa a confirmar completo (esto está relacionado con Ítem 4, pero la regla indica penalizar aquí si la falta inicial de pedir el completo ocurre sin negativa previa).
+        - Relación con otros ítems: Sin relación directa (la penalización de los 3 últimos DNI es una excepción dentro de este ítem, no una relación de dependencia de resultado con Ítem 4).
+        """
+    },
+    "4": { # Ítem crítico - Mantenemos la definición anterior
+        "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento",
+        "complexity": "MEDIO",
+        "description": "Evalúa la correcta identificación del interviniente según tipo de llamada (entrante/saliente), DNI/NIE, fecha nacimiento, excepciones.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 4: Identificación del Interviniente.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+        Datos K+ Relevantes (si aplica, ej: ¿DOB en sistema?): {k_plus_data}
+
+        **Reglas de Evaluación (Ítem 4):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados. Ignora cualquier otra consideración no especificada en las reglas.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "4",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación de por qué Pass, Fail o N/A, citando evidencia de la transcripción si es posible.",
+          "transcript_segment": "Fragmento relevante de la transcripción (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido y contenga solo el objeto JSON.
+        """,
+        "rules_detail": """
+        - Llamadas Salientes: Confirmar nombre completo Y facilitar DNI/NIE completo.
+        - Llamadas Entrantes: Confirmar nombre completo + DNI/NIE completo + fecha de nacimiento.
+        - Excepciones:
+          - NO informar motivo antes de confirmar identidad.
+          - Solo solicitar 3 últimos dígitos DNI/NIE si hay negativa previa a darlo completo (la penalización por pedir 3 últimos SIN negativa previa va en Ítem 3). Aquí se valora si la excepción se aplicó correctamente DESPUÉS de una negativa.
+          - Si fecha nacimiento no está en sistema y validan por dirección, se considera correcto (necesitas saber si fecha nacimiento NO estaba en sistema - usa k_plus_data).
+          - Llamadas entrantes por SMS/perdida donde agente da nombre: Válido si sigue resto de indicaciones (ej: pide DNI/fecha nacimiento).
+          - Autorizados sin DNI/NIE: Válido si facilitan empresa cedente/producto/referencia contrato.
+        - Relación con Ítem 17: Si se da información contractual a un NO interviniente, el fallo principal se valora en Ítem 17. Considera si la falla de identificación en Ítem 4 llevó a una situación de Ítem 17, pero enfócate en si la *identificación en sí misma* cumplió las reglas de este ítem.
+        """
+    },
+     "5": {
+        "name": "Motivo llamada-identificar expediente. Prescripción",
+        "complexity": "MEDIO",
+        "description": "Evalúa si se maneja la información de prescripción o productos/cedente/importes correctamente al inicio de la llamada.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 5: Motivo llamada - Identificar Expediente / Prescripción.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        ¿El expediente tiene flag de Argumentario Prescripción?: {has_prescription_flag}
+        Fecha de la flag de Prescripción (si existe): {prescription_flag_date} (considera "reciente" si < 3 meses desde hoy)
+
+        **Reglas de Evaluación (Ítem 5):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos sobre la flag de prescripción.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "5",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se aplicó/informó prescripción o datos correctamente, si hubo errores, si se corrigieron).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        - La prescripción (si aplica) debe ajustarse fielmente al texto facilitado y con datos (fechas/importes) correctos.
+        - Si NO procede prescripción (porque flag < 3 meses o no hay flag), se debe informar de productos, cedente e importes.
+        - Si expediente NO tiene flag O flag > 3 meses Y se realiza la prescripción, se DEBE mencionar que se registrará la flag (aunque no puedes verificar el registro real).
+        - Penalizar si se facilitan datos erróneos (cedente, producto, importe, fecha formalización).
+        - Si se facilitan datos erróneos Y el agente lo corrige MÁS TARDE en la conversación, NO se penaliza (Pass si se corrigió).
+        - Excepciones y otras consideraciones:
+          - Si al hacer prescripción NO se indica el tipo de interviniente (ej: "usted tiene un préstamo") pero queda claro que es el cliente principal (ej: cliente dice "tengo una tarjeta" y es único cliente), NO se penaliza (Pass).
+        - Relación con Ítem 14: Si se facilitan datos erróneos en la prescripción y el error se mantiene (no se corrige), la penalización va en este ítem (5), NO en Ítem 14. Tu tarea es identificar el error y si se corrigió DENTRO de esta llamada.
+        """
+    },
+    "6": { # Ítem crítico - Mantenemos la definición anterior
+        "name": "Confirmar datos contacto (dirección, teléfono, email)",
+        "complexity": "MEDIO",
+        "description": "Valora si se confirman COMPLETOS todos los datos de contacto 'VALIDO' de K+.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 6: Confirmación de Datos de Contacto.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        Datos de Contacto 'VALIDO' en K+: {k_plus_valid_contacts}
+        Duración de la Llamada (gestionada por código, ignora si la lógica previa lo marcó como N/A): {call_duration} minutos
+        Incidencia en K+ (gestionada por código, ignora si la lógica previa lo marcó como N/A): {k_plus_incident}
+
+        **Reglas de Evaluación (Ítem 6):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "6",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, citando si se confirmaron TODOS los datos 'VALIDO' o no, o por qué es N/A.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Si la lógica previa en el código ya marcó como N/A por duración o incidencia, tu tarea no se ejecutará para este ítem.
+        """,
+        "rules_detail": """
+        - Válido SÓLO si se confirman, de manera COMPLETA, TODOS los datos de contacto marcados como "VALIDO" en K+.
+        - EXCEPCIONES (gestionadas en código, no evalúes si aplica): No se valora en llamadas < 4 minutos. No se valora si hay incidencias de K+ reportadas.
+        - Relación con Ítem 21: Si por operativa NO toca confirmar datos pero se hace de forma incompleta, o si hay un envío SMS/Mail y se confirma solo el telf/mail usado dejando otros sin confirmar, se evaluaría en Ítem 21, NO en Ítem 6. Si hay envío SMS/Mail y no se confirman datos pero YA se confirmaron el último mes, se valora en Ítem 21. Si identificas una de estas situaciones en la transcripción (confirmación incompleta de datos 'VALIDO' existentes cuando SÍ tocaba confirmar), marca como Fail en Ítem 6 y en la razón indica la situación.
+        - Relación con Ítem 7: Solicitar datos adicionales (teléfono y mail) *después* de confirmar datos del sistema se valora en Ítem 7, NO en Ítem 6. Asegúrate de que la evaluación sea solo sobre la confirmación de los datos *ya existentes* en K+ marcados como "VALIDO".
+        """
+    },
+    "7": {
+        "name": "Solicitar datos contacto adicionales",
+        "complexity": "BAJO",
+        "description": "Evalúa si se solicitan datos de contacto adicionales (teléfono, mail) cuando corresponde.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 7: Solicitar Datos de Contacto Adicionales.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        Número de teléfonos existentes en K+: {k_plus_phone_count}
+        Número de emails existentes en K+: {k_plus_email_count}
+        ¿Corresponde confirmación y/o actualización de datos en esta llamada?: {corresponds_update}
+        ¿Es autorizado expreso?: {is_authorised_express}
+
+        **Reglas de Evaluación (Ítem 7):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados. Busca la SOLICITUD activa por parte del agente de un teléfono (fijo o móvil) y/o un email ADICIONAL.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "7",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se solicitó o no, y si correspondía hacerlo según reglas/excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        - La solicitud de datos adicionales (teléfono fijo/móvil y email si no tenemos uno) debe hacerse en todas nuestras confirmaciones y/o actualizaciones de datos.
+        - En este ítem solo se valora la SOLICITUD, no si el dato se da o se registra correctamente.
+        - Excepciones y otras consideraciones (marca N/A o Pass si aplica):
+          - NO se valorará si ya disponemos de más de un teléfono Y más de un email de contacto (requiere k_plus_phone_count > 1 Y k_plus_email_count > 1).
+          - NO se valorará si NO corresponde confirmación y/o actualización de datos en esta llamada (requiere depends_on_update = False).
+          - La operativa NO aplica para autorizados
