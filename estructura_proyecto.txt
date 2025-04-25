@@ -1,0 +1,113 @@
+Claro, hablemos de cómo estructurar el proyecto en Python de manera modular y escalable, teniendo en cuenta la integración de los módulos de descarga, procesamiento de audio con Whisper, y la parte de evaluación que ya hemos abordado. Una buena estructura de archivos y modularización son clave para un proyecto de este tamaño y complejidad.
+Principios Clave para la Estructura:
+ * Modularidad: Cada parte lógica del proceso (descarga, transcripción, carga de datos, evaluación, guardado) debe estar en su propio módulo (archivo o carpeta) de Python.
+ * Separación de Responsabilidades: Cada módulo debe hacer una única cosa bien definida.
+ * Configuración Centralizada: La configuración (rutas de archivos, credenciales API, parámetros del modelo, reglas de evaluación) debe estar separada del código lógico.
+ * Estructura de Directorios Clara: Organizar los archivos de forma lógica facilita la navegación y el mantenimiento.
+ * Manejo de Datos: Definir claramente dónde se almacenan los datos en cada etapa del pipeline.
+Estructura de Directorios Propuesta:
+Adoptaremos una estructura común para proyectos Python, separando el código fuente, la configuración, los datos y los resultados.
+project_root/
+│
+├── src/                  # Código fuente del proyecto
+│   ├── __init__.py         # Indica que src/ es un paquete Python
+│   │
+│   ├── config/           # Módulo para cargar la configuración
+│   │   ├── __init__.py
+│   │   └── config_manager.py # Carga de config (variables de entorno, .env, etc.)
+│   │
+│   ├── data_acquisition/ # Módulo para descargar llamadas y transcripciones iniciales
+│   │   ├── __init__.py
+│   │   └── downloader.py
+│   │
+│   ├── audio_processing/ # Módulo para procesar audio con Whisper
+│   │   ├── __init__.py
+│   │   └── whisper_processor.py
+│   │
+│   ├── data_preparation/ # Módulo para cargar y preparar datos (transcripciones, K+, etc.)
+│   │   ├── __init__.py
+│   │   └── data_loader.py  # Ensambla el diccionario call_data por llamada
+│   │
+│   ├── evaluation/       # Módulo principal de la lógica de evaluación (LLM)
+│   │   ├── __init__.py
+│   │   ├── item_rules.py       # Definición de ITEM_RULES y EVALUATION_STRUCTURE
+│   │   ├── evaluator.py        # Lógica para llamar al LLM (evaluate_with_llm)
+│   │   └── postprocessor.py    # Lógica de post-procesamiento (apply_post_processing)
+│   │
+│   ├── results/          # Módulo para manejar el guardado de resultados
+│   │   ├── __init__.py
+│   │   └── results_handler.py # Guarda resultados en JSON, CSV, etc.
+│   │
+│   └── main_workflow.py    # Script principal que orquesta todo el pipeline
+│
+├── data/                 # Directorio para almacenar datos (localmente en la POC)
+│   ├── raw_calls/          # Audios descargados
+│   ├── raw_transcripts/    # Transcripciones iniciales descargadas
+│   ├── whisper_transcripts/# Transcripciones generadas por Whisper
+│   ├── k_plus_data/        # Archivos con datos estructurados de K+ (CSV, JSON por llamada/batch)
+│   └── processed/          # (Opcional) Datos intermedios si los hubiera
+│
+├── config/               # Archivos de configuración (ej. YAML, JSON)
+│   └── settings.yaml       # Configuración general (rutas, API endpoints, etc.)
+│
+├── results/              # Directorio para almacenar los resultados finales
+│   └── evaluation_output.json # Ejemplo de archivo de resultados
+│
+├── scripts/              # Scripts de ayuda (ej. setup.sh, run_pipeline.py - wrapper simple)
+│
+├── .env                  # Archivo para variables de entorno (credenciales sensibles)
+├── requirements.txt      # Dependencias del proyecto
+└── README.md             # Documentación del proyecto
+
+Explicación de los Módulos (Archivos/Carpetas en src/):
+ * src/config/config_manager.py:
+   * Responsabilidad: Cargar la configuración del proyecto.
+   * Funcionalidad: Leerá variables de entorno (para credenciales, usando python-dotenv), y posiblemente un archivo de configuración (ej. config/settings.yaml) para rutas de archivos, parámetros no sensibles del modelo, etc.
+   * Cómo usarlo: Otros módulos importarán funciones o una clase de config_manager para acceder a la configuración de manera centralizada.
+ * src/data_acquisition/downloader.py:
+   * Responsabilidad: Conectarse a la fuente de datos de llamadas (vuestro sistema actual, API, BBDD) y descargar los archivos de audio y las transcripciones iniciales.
+   * Funcionalidad: Implementará la lógica para autenticarse, consultar la lista de llamadas a descargar (ej. por fecha), y guardar los archivos correspondientes en data/raw_calls/ y data/raw_transcripts/.
+   * Entrada: Parámetros de conexión, rango de fechas/IDs.
+   * Salida: Archivos guardados localmente, quizás una lista de metadatos básicos de las llamadas descargadas.
+ * src/audio_processing/whisper_processor.py:
+   * Responsabilidad: Tomar archivos de audio y generar transcripciones de alta calidad usando la API de Azure OpenAI Whisper. Opcionalmente, procesar para datos paralingüísticos si la API lo permite o si se usan otras herramientas.
+   * Funcionalidad: Leerá archivos de audio de data/raw_calls/, llamará a la API de Whisper, y guardará las nuevas transcripciones en data/whisper_transcripts/. Podría devolver metadatos de la transcripción (ej. duración real del audio, posibles marcas de tiempo).
+   * Entrada: Rutas a archivos de audio, configuración API de Whisper.
+   * Salida: Archivos .txt (o similar) en data/whisper_transcripts/.
+ * src/data_preparation/data_loader.py:
+   * Responsabilidad: Unir todas las piezas de datos necesarias para una llamada específica (o un lote de llamadas) y prepararlas para la evaluación.
+   * Funcionalidad: Leerá la transcripción seleccionada (la de Whisper si se procesó, o la raw si no), la ruta al archivo de audio (si es necesaria en la evaluación o post-procesamiento), y cargará los datos estructurados de K+ correspondientes a esa llamada (de archivos en data/k_plus_data/). Ensamblará el diccionario call_data que hemos estado usando ({'transcript': '...', 'call_metadata': {...}}).
+   * Entrada: ID de llamada, rutas a los directorios de datos (data/whisper_transcripts/, data/raw_transcripts/, data/k_plus_data/).
+   * Salida: Un diccionario call_data bien estructurado para cada llamada.
+ * src/evaluation/: Este paquete contendrá la lógica de evaluación.
+   * item_rules.py: Contendrá las definiciones de ITEM_RULES y EVALUATION_STRUCTURE con las reglas detalladas y la definición de grupos/ítems individuales a evaluar.
+   * evaluator.py: Contendrá la función evaluate_with_llm que llama a la API de OpenAI, construye los prompts (para grupos o ítems individuales) y parsea las respuestas.
+   * postprocessor.py: Contendrá la función apply_post_processing para aplicar lógica de negocio que relaciona los resultados de diferentes ítems.
+   * __init__.py: Puede importar las funciones clave (evaluate_with_llm, apply_post_processing) para facilitar la importación en el main_workflow.
+ * src/results/results_handler.py:
+   * Responsabilidad: Guardar los resultados de la evaluación en el formato deseado.
+   * Funcionalidad: Tomará la lista final de resultados por llamada y la escribirá en un archivo (ej. JSON, CSV) en el directorio results/.
+   * Entrada: Lista de resultados de la evaluación, ruta de salida.
+   * Salida: Archivo(s) en results/.
+ * src/main_workflow.py:
+   * Responsabilidad: Ser el punto de entrada y orquestar la ejecución del pipeline completo.
+   * Funcionalidad:
+     * Leer configuración (config_manager).
+     * Definir qué llamadas procesar.
+     * Llamar a downloader para obtener datos brutos (si es la primera vez).
+     * Llamar a whisper_processor para generar transcripciones de alta calidad (si se necesita).
+     * Iterar sobre las llamadas a procesar:
+       * Llamar a data_loader para obtener los datos de la llamada.
+       * Llamar a evaluation.evaluator (que internamente usa item_rules) para obtener los resultados iniciales del LLM.
+       * Llamar a evaluation.postprocessor para ajustar los resultados.
+     * Llamar a results_handler para guardar los resultados finales.
+Implementación para la POC (Enfoque Local):
+Para la POC inicial con archivos locales, el downloader.py y whisper_processor.py serán versiones simplificadas que asumen que los archivos ya están en las carpetas data/raw_calls/ y data/raw_transcripts/. whisper_processor.py leería de data/raw_calls/ y escribiría en data/whisper_transcripts/. data_loader.py leería de data/whisper_transcripts/ (o raw_transcripts/) y data/k_plus_data/. La función load_call_data que hemos usado hasta ahora en el script único, se movería y adaptaría a data_loader.py.
+Ventajas de esta Estructura:
+ * Claridad: Es fácil entender qué hace cada parte del código.
+ * Mantenimiento: Los cambios en un módulo (ej. cambiar la fuente de descarga, usar otra API de transcripción) tienen un impacto limitado en otros módulos.
+ * Reutilización: Los módulos (ej. config_manager, results_handler) pueden ser reutilizados en otros proyectos.
+ * Testabilidad: Es más fácil escribir pruebas unitarias para módulos pequeños y con responsabilidades claras.
+ * Colaboración: Diferentes miembros del equipo pueden trabajar en distintos módulos simultáneamente.
+ * Escalabilidad: A medida que el proyecto crezca, puedes refinar módulos (ej. usar bases de datos en lugar de archivos, procesar en paralelo) sin romper la estructura general.
+Esta estructura proporciona una hoja de ruta clara para expandir la POC a una solución más completa, manteniendo el código organizado y manejable.
