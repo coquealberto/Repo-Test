@@ -1,0 +1,60 @@
+Excelente, esta aclaración sobre la disponibilidad de todos los campos de Kollecto (K+) necesarios como entrada para el LLM es muy importante. Cambia significativamente el alcance de la evaluación automatizada, especialmente para ítems que dependen de verificar el estado del sistema o el resultado de acciones del agente, como el Ítem 20.
+Anteriormente, la limitación del Ítem 20 residía en que el LLM solo veía la transcripción y no podía verificar si el alta o modificación en K+ se realizó correctamente o si un dato existía ya. Con los datos de K+ disponibles, el LLM sí puede, potencialmente, realizar esta verificación al comparar la conversación en la transcripción con el estado de los datos proporcionados desde K+ (idealmente, el estado después de la llamada).
+Impacto en la Estrategia y el Código:
+ * Precisión de la Evaluación: La evaluación puede ser mucho más precisa, especialmente para ítems como el 20, el 6 (comparar confirmación vs datos "VALIDO"), el 4 (validaciones que dependen de datos en sistema como si la fecha de nacimiento está en K+), el 7 (verificar si ya hay más de un teléfono/email), y el 17 (verificar estado "abogado personado").
+ * Complejidad de los Prompts: Los prompts deberán ser actualizados para incluir esta información estructurada de K+. Será crucial explicar al LLM cómo utilizar esta información en conjunto con la transcripción para tomar sus decisiones de evaluación. Las reglas en el rules_detail ahora pueden hacer referencia explícita a los datos de K+.
+ * Datos de Entrada (call_metadata): La función load_call_data (y tu lógica de carga real) deberá poblar el diccionario call_metadata con una representación completa de los campos de K+ relevantes para todos los ítems a evaluar. Un sub-diccionario dedicado (k_plus_data_snapshot o similar) dentro de call_metadata sería una forma limpia de organizar esto.
+ * Lógica de Post-Procesamiento: La necesidad de añadir notas sobre las limitaciones del LLM (como en Ítem 20) se reduce o elimina, ya que el LLM está mejor informado. Sin embargo, el post-procesamiento seguirá siendo útil para aplicar reglas complejas que comparen resultados de diferentes ítems o para añadir metadatos a los resultados finales.
+Actualizaciones Necesarias en el Código (Considerando Datos de K+ Disponibles para LLM):
+El diseño de agrupar el Bloque 1 (1-7) y evaluar 17, 20, 26 individualmente sigue siendo válido como estrategia de optimización coste/calidad. Las modificaciones principales se centrarán en cómo se pasan y se usan los datos de K+ en los prompts y en la lógica de evaluación.
+ * Enriquecer call_metadata: La función load_call_data (y tu fuente de datos real) debe proporcionar un diccionario detallado del estado de K+ para cada llamada.
+   # Ejemplo extendido para load_call_data (dentro de dummy_calls o tu carga real)
+"call_metadata": {
+    # ... otros campos como call_id, call_type, duration ...
+    "k_plus_data_snapshot": { # Nuevo diccionario con datos de K+
+        "direccion_valido": "C/ Falsa 123",
+        "telefonos_validos": ["555-1234", "555-5678"], # Lista de teléfonos válidos
+        "emails_validos": ["test@example.com"], # Lista de emails válidos
+        "fecha_nacimiento": "1980-01-01", # Fecha nacimiento en K+
+        "dni_nie_completo": "12345678A", # DNI/NIE en K+
+        "abogado_personado": True, # Booleano
+        "tiene_flag_argumentario_prescripcion": True, # Booleano
+        "fecha_flag_argumentario_prescripcion": "2024-04-01", # Fecha de la flag
+        # ... otros campos de K+ relevantes para cualquier ítem (ej. datos contractuales para 17, estado de registro de nuevos datos para 20)
+        "estado_registro_direccion_nueva_hablada_en_call": "Correctamente Registrada C/ Nueva 7, 3 Izq", # Simulando K+ state post-call para dato discutido
+         "estado_registro_telefono_nuevo_hablado_en_call": "No Registrado", # Simulando K+ state post-call
+         "numero_telefonos_total_en_k": 2, # Para Item 7 (diferente de validos si aplica)
+         "numero_emails_total_en_k": 1, # Para Item 7
+    }
+    # ... otros campos calculados si son útiles (ej: is_prescription_flag_recent, coincides_incidencia_k+)
+}
+
+ * Actualizar evaluate_with_llm: Asegurarse de que el diccionario prompt_data incluye este sub-diccionario k_plus_data_snapshot completo.
+ * Actualizar Prompt Templates (prompt_template y rules_detail): Modificar los prompts (tanto el del grupo como los individuales) para instruir al LLM a usar k_plus_data_snapshot cuando las reglas lo requieran.
+   * Ejemplo (Ítem 4 en prompt del grupo):
+     --- Reglas Ítem 4: Nombre completo Interviniente, DNI/NIF, Fecha nacimiento ---
+Evalúa correcta identificación (Nombre Completo, DNI/NIE, Fecha Nacimiento) según tipo llamada.
+- Llamadas Salientes: Nombre completo Y DNI/NIE completo.
+- Llamadas Entrantes: Nombre completo + DNI/NIE completo + fecha nacimiento.
+- Excepciones: NO informar motivo antes identificar. Solo 3 últimos DNI si NEGATIVA previa. Si DOB no en sistema Y valida por dirección, correcto. -> **VERIFICAR en k_plus_data_snapshot si "fecha_nacimiento" está presente/vacío para saber si NO estaba en sistema.** Comparar dirección dicha en transcripción con "direccion_valido" en k_plus_data_snapshot si se usa para validar.
+- ... (otras reglas) ...
+
+   * Ejemplo (Ítem 6 en prompt del grupo):
+     --- Reglas Ítem 6: Confirmar datos contacto (dirección, teléfono, email) ---
+Valora si se confirman COMPLETOS todos los datos de contacto marcados "VALIDO" en K+.
+- Válido SÓLO si confirma COMPLETO TODOS los datos "VALIDO". -> **COMPARAR la lista de contactos 'VALIDO' en k_plus_data_snapshot ("direccion_valido", "telefonos_validos", "emails_validos") con los contactos que el agente confirma en la transcripción.**
+- EXCEPCIONES (gestionadas en código, LLM no evalúa si aplica): NO valora llamadas < 4 minutos. NO valora si incidencias K+ reportadas.
+- ... (otras reglas) ...
+
+   * Ejemplo (Ítem 20 Individual):
+     --- Reglas Ítem 20: Alta / Asignación datos (...) ---
+Evalúa si el agente habla de dar de alta un dato nuevo necesario, o si discute un dato que NO debe darse de alta.
+- Penaliza cuando se habla de dar de alta dato nuevo necesario que NO SE HACE (según conv.) O se habla de dar de alta dato que POR OPERATIVA NO DEBE incorporarse (ej. Comisaría).
+- Si discute alta dato nuevo con error evidente en conv. (ej. CP erróneo), penaliza.
+- **USAR k_plus_data_snapshot para verificar si un dato que el agente dijo que daría de alta o que el deudor dio como NUEVO fue aparentemente registrado/actualizado y si parece coincidir con lo discutido.** Por ejemplo, si el agente habla de registrar una nueva dirección, verificar si "estado_registro_direccion_nueva_hablada_en_call" indica registro correcto. Si el deudor da un nuevo teléfono, verificar si "estado_registro_telefono_nuevo_hablado_en_call" indica registro. Si un dato no permitido (ej. Comisaría) se menciona como registrado, penaliza.
+- Relación con Ítem 21: ...
+
+ * Revisar Post-Procesamiento: Con el LLM teniendo acceso a los datos de K+, la lógica de post-procesamiento puede simplificarse. Por ejemplo, la nota de limitación para el Ítem 20 podría eliminarse o modificarse. Las reglas complejas de interdependencia que antes eran difíciles de automatizar porque el LLM no tenía toda la información, ahora podrían ser más factibles de implementar en el post-procesamiento (aunque para la POC, mantenerlo simple sigue siendo recomendable a menos que una dependencia específica sea muy crítica y no se pueda delegar completamente al LLM).
+Conclusión sobre la Agrupación con Datos de K+:
+La disponibilidad de datos de K+ hace que la evaluación automatizada sea mucho más potente y precisa. La estrategia de agrupar el Bloque 1 (1-7) y evaluar 17, 20, 26 individualmente sigue siendo una estrategia de compromiso sensata para la POC en términos de coste y complejidad de prompts, pero ahora las evaluaciones dentro de cada prompt (ya sea individual o agrupado) podrán ser de mayor calidad al tener acceso a más contexto del sistema.
+Asegúrate de que la forma en que se presenten los datos de K+ en el diccionario k_plus_data_snapshot sea clara y estructurada para el LLM, con nombres de claves descriptivos. Esto ayudará enormemente al modelo a interpretarlos y utilizarlos correctamente según las reglas en el prompt.
