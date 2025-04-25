@@ -1,0 +1,229 @@
+Tienes toda la razón. Dada la envergadura potencial del proyecto (29 ítems, miles de llamadas diarias), la estrategia de evaluar cada ítem con una llamada separada al LLM sería muy costosa y con una latencia elevada. Agrupar ítems es una necesidad para que la solución sea viable económicamente y eficiente en tiempo de procesamiento.
+El desafío, como bien señalas, es encontrar un equilibrio entre la reducción de costes/latencia y el mantenimiento de una calidad de evaluación suficiente. Agrupar demasiados ítems con reglas complejas y dependencias diversas en un solo prompt puede "confundir" al modelo y llevar a resultados menos precisos.
+Análisis de los Bloques para Agrupación:
+Observando la imagen y la información que me has dado:
+ * Inicio Llamada (1-7): Este bloque es el más prometedor para una primera agrupación. Los 7 ítems se refieren a la fase inicial de la llamada, tienen complejidades entre BAJO y MEDIO, y las relaciones con otros ítems mencionadas son principalmente "Sin relación directa" o refieren a ítems (como 21 o 14) que no están en el alcance actual de la POC o describen dónde penalizar algo detectado (ej. Ítem 3 vs Ítem 4). Agrupar estos 7 ítems en un solo prompt parece lógico y podría reducir 7 llamadas API a 1 por llamada procesada para este bloque.
+ * LOPD (17): Es un bloque de un solo ítem, de complejidad ALTA, crítico y muy específico ("Tratamiento de la información con 3os"). Dada su criticidad y complejidad, y que no tiene relaciones directas relevantes con otros ítems en la POC, evaluarlo de forma individual (un prompt específico para Ítem 17) parece la opción más segura para asegurar precisión.
+ * Registro Datos en Sistemas (20-21): El Ítem 20 es crítico y de complejidad BAJA, pero con la limitación crucial de que el LLM solo ve la transcripción, no el sistema K+. El Ítem 21 es "Actualizar situación datos existentes" y parece fuertemente ligado a la operativa de registro/actualización en sistema. Agrupar 20 y 21 (cuando tengas las reglas de 21) tendría sentido a futuro. Para la POC actual (solo Ítem 20), evaluarlo individualmente mantiene clara la limitación de no poder verificar el sistema. Agruparlo con el Bloque 1 no parece natural. Mantener Ítem 20 como evaluación individual por ahora parece razonable.
+ * Código Deontológico (26): Es un bloque de un solo ítem, de complejidad ALTA, crítico, y relacionado con el tono y comportamiento. Está relacionado con Ítem 23 ("Comunicación"), que es parte del bloque "Comportamiento en Llamada". A futuro, podrías agrupar 26 con 22, 23, 24, 25. Para la POC actual, con solo Ítem 26, evaluarlo individualmente o en un pequeño grupo de comportamiento (si tuvieras las reglas de 23-25) es mejor que mezclarlo con el inicio de llamada. Mantener Ítem 26 como evaluación individual parece prudente dada su complejidad y subjetividad (tono).
+Sugerencia de Agrupación para la POC (Ítems 1-7, 17, 20, 26):
+Basándome en la estructura de bloques, la complejidad de los ítems y la información disponible para la POC, sugiero la siguiente estrategia de agrupación para reducir costes y latencia:
+ * Grupo 1: Inicio Llamada (Ítems 1, 2, 3, 4, 5, 6, 7): Evaluar estos 7 ítems en una única llamada al LLM.
+ * Ítem Individual 2: LOPD (Ítem 17): Evaluar este ítem crítico de forma individual en una llamada separada.
+ * Ítem Individual 3: Registro Datos (Ítem 20): Evaluar este ítem (con la limitación de no ver K+) de forma individual en una llamada separada.
+ * Ítem Individual 4: Código Deontológico (Ítem 26): Evaluar este ítem crítico de forma individual en una llamada separada.
+Esta estrategia reduce el número de llamadas al LLM por cada transcripción de 10 (uno por cada ítem 1,2,3,4,5,6,7,17,20,26) a 4 llamadas (una por el grupo 1-7, una por 17, una por 20, una por 26). Esto representa una reducción del 60% en las llamadas a la API para los ítems actualmente en scope de la POC, lo cual es significativo para el coste y la latencia.
+Implicaciones en el Código Python:
+Implementar esta estrategia requiere modificar la estructura del código:
+ * Definir Grupos: En lugar de un simple diccionario ITEM_RULES donde cada clave es un ítem, necesitarás definir los grupos de ítems y los ítems individuales. Un nuevo diccionario o estructura sería útil.
+   EVALUATION_STRUCTURE = {
+    "inicio_llamada_group": ["1", "2", "3", "4", "5", "6", "7"],
+    "item_17_individual": ["17"],
+    "item_20_individual": ["20"],
+    "item_26_individual": ["26"],
+    # Futuros grupos o ítems individuales se añadirían aquí
+}
+
+# Mantener ITEM_RULES para tener las reglas detalladas de cada ítem
+ITEM_RULES = { ... } # El diccionario existente con reglas por ítem individual
+
+ * Prompts para Grupos: Necesitarás crear un nuevo prompt template para el grupo "Inicio Llamada". Este prompt debe:
+   * Indicar claramente que se van a evaluar MÚLTIPLES ítems.
+   * Listar cada ítem del grupo y sus reglas de evaluación específicas (usando los rules_detail del ITEM_RULES original).
+   * Instruir al LLM a devolver los resultados de todos los ítems del grupo en un formato estructurado, preferiblemente una lista de objetos JSON, donde cada objeto representa el resultado de un ítem ({"item_id": "...", "result": "...", ...}).
+ * Función de Evaluación: La función que llama al LLM (evaluate_with_llm) necesitará ser más flexible:
+   * Aceptar una lista de item_ids (el grupo o un ítem individual).
+   * Si es un grupo, construir el prompt combinado usando los templates y reglas de cada ítem del grupo.
+   * Si es un ítem individual (17, 20, 26), usar el template y reglas de ese ítem específico (como se hace actualmente).
+   * Parsing de la respuesta: Si se evalúa un grupo, la función debe esperar y parsear una lista de resultados JSON. Si es un ítem individual, espera y parsea un solo objeto JSON.
+ * process_call Function: Modificar el bucle para iterar sobre la EVALUATION_STRUCTURE. Para cada entrada (grupo o ítem individual), llamar a la función de evaluación con la lista de IDs correspondiente y la transcripción/metadatos. Acumular todos los resultados recibidos (que ahora pueden ser listas de resultados si vienen de un grupo).
+ * apply_post_processing Function: Esta función ya trabaja con una lista plana de resultados de ítems, por lo que debería requerir pocos cambios importantes para procesar resultados que vengan de llamadas agrupadas o individuales, siempre que el formato final ({"item_id": "...", ...}) sea consistente.
+Código Python Actualizado con Agrupación del Bloque 1:
+Vamos a modificar el código anterior para implementar la agrupación del bloque "Inicio Llamada".
+import os
+import json
+from openai import AzureOpenAI
+from datetime import datetime, timedelta # Importar para lógica de fecha en dummy data
+
+# --- Configuración ---
+# Reemplaza con tus datos de configuración de Azure OpenAI o asegura variables de entorno
+AZURE_OPENAI_ENDPOINT = os.environ.get("AZURE_OPENAI_ENDPOINT", "YOUR_AZURE_ENDPOINT")
+AZURE_OPENAI_KEY = os.environ.get("AZURE_OPENAI_KEY", "YOUR_AZURE_KEY")
+AZURE_OPENAI_DEPLOYMENT_NAME = os.environ.get("AZURE_OPENAI_DEPLOYMENT_NAME", "gpt-4o")
+AZURE_OPENAI_API_VERSION = os.environ.get("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
+
+# --- Cliente de Azure OpenAI ---
+try:
+    client = AzureOpenAI(
+        azure_endpoint=AZURE_OPENAI_ENDPOINT,
+        api_key=AZURE_OPENAI_KEY,
+        api_version=AZURE_OPENAI_API_VERSION
+    )
+    print("Azure OpenAI client initialized successfully.")
+except Exception as e:
+    print(f"Error initializing Azure OpenAI client: {e}")
+    print("Please check your AZURE_OPENAI_ENDPOINT, AZURE_OPENAI_KEY, AZURE_OPENAI_DEPLOYMENT_NAME, and AZURE_OPENAI_API_VERSION configuration.")
+    # exit() # Descomentar para salir si la configuración es crítica
+
+# --- Definición de Items y sus reglas (completo para los 10 ítems en scope) ---
+ITEM_RULES = {
+    # Bloque 1: Inicio Llamada
+    "1": { "name": "Saludo+Identificación (agente+empresa)", "complexity": "BAJO", "description": "...",
+           "rules_detail": """
+           Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+           - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+           - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+           - Excepciones y otras consideraciones: Si agente solo indica su nombre, se acepta. Si frase en diferente orden, se acepta.
+           - Relación con otros ítems: Sin relación directa.
+           """},
+    "2": { "name": "Informar posible grabación llamada + GDPR", "complexity": "BAJO", "description": "...",
+           "rules_detail": """
+           Informar siguiendo argumentario en TODAS llamadas salientes (incl. callback). RedSys: informar parar/reanudar grabación. Añadir persona: identificarse e informar grabación.
+           - Excepciones: Cliente interrumpe, no se valora (Pass). Frase no exacta pero informa, correcto (Pass). Empresas autorizadas con NDA, no es necesario informar (Pass/N/A si aplica).
+           - Relación con otros ítems: Sin relación directa.
+           """},
+    "3": { "name": "Identificación interlocutor (buscar confirmación)", "complexity": "BAJO", "description": "...",
+           "rules_detail": """
+           Agente debe buscar confirmación de que habla con la persona correcta (cliente).
+           - Llamadas IN: Solicitar interlocutor facilite nombre y motivo. Si es cliente, pedir Nombre Completo, DNI, Fecha Nacimiento.
+           - Llamadas OUT: Preguntar por interviniente con Nombre y Apellidos. Debe responder afirmativamente a "¿Es usted?". No basta con "Sí", "Dígame".
+           - Excepciones: Interlocutor en llamada IN referencia su deuda ("llamo por mi tarjeta"), NO necesario el check "¿es usted?" (Pass). Llamada IN: agente pide datos ANTES de saber si es cliente, penaliza. Llamada IN: agente lee nombre SIN solicitar interlocutor lo facilite, penaliza. Penalizar solicitar 3 últimos dígitos DNI SIN negativa previa a confirmar completo (relacionado con Ítem 4, pero penaliza aquí).
+           - Relación con otros ítems: Sin relación directa.
+           """},
+    "4": { "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Evalúa correcta identificación (Nombre Completo, DNI/NIE, Fecha Nacimiento) según tipo llamada.
+           - Llamadas Salientes: Nombre completo Y DNI/NIE completo.
+           - Llamadas Entrantes: Nombre completo + DNI/NIE completo + fecha nacimiento.
+           - Excepciones: NO informar motivo antes identificar. Solo 3 últimos DNI si NEGATIVA previa. Si DOB no en sistema y valida por dirección, correcto. IN por SMS/perdida donde agente da nombre: Válido si sigue resto (pide DNI/DOB). Autorizados sin DNI/NIE: Válido si facilitan cedente/producto/ref.
+           - Relación con Ítem 17: Si info contractual a NO interviniente (Ítem 4 Fail por persona incorrecta), fallo principal en Ítem 17.
+           """},
+    "5": { "name": "Motivo llamada-identificar expediente. Prescripción", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Manejo correcto de información de prescripción o productos/cedente/importes.
+           - Si aplica prescripción: fiel al texto facilitado y datos (fechas/importes) correctos.
+           - Si NO procede prescripción (flag < 3 meses o no hay flag): informar productos, cedente, importes.
+           - Si expediente NO tiene flag O flag > 3 meses Y hace prescripción: DEBE mencionar que registrará flag.
+           - Penalizar datos erróneos (cedente, producto, importe, fecha formalización).
+           - Si error corregido MÁS TARDE: NO penaliza (Pass).
+           - Excepciones: Al hacer prescripción NO indica tipo interviniente ("usted tiene un préstamo") pero es cliente principal (ej. cliente dice "tengo una tarjeta" y es único): NO penaliza (Pass).
+           - Relación con Ítem 14: Si datos erróneos en prescripción y error mantenido, penalización en Ítem 5, NO Ítem 14.
+           """},
+    "6": { "name": "Confirmar datos contacto (dirección, teléfono, email)", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Valora si se confirman COMPLETOS todos los datos de contacto marcados "VALIDO" en K+.
+           - Válido SÓLO si confirma COMPLETO TODOS los datos "VALIDO".
+           - EXCEPCIONES (gestionadas en código, LLM no evalúa si aplica): NO valora llamadas < 4 minutos. NO valora si incidencias K+ reportadas.
+           - Relación con Ítem 21: Confirmación incompleta de datos 'VALIDO' existentes cuando tocaba confirmar -> Fail en Ítem 6 y nota situación. Situaciones de Ítem 21 (conf. incompleta por operativa, no conf. por envío pero ya conf. último mes) penalizan en Ítem 21, no aquí.
+           - Relación con Ítem 7: Solicitar datos adicionales DESPUÉS de confirmar datos sistema -> Ítem 7, NO Ítem 6.
+           """},
+    "7": { "name": "Solicitar datos contacto adicionales", "complexity": "BAJO", "description": "...",
+           "rules_detail": """
+           Evalúa si se solicitan datos de contacto adicionales (teléfono, mail) cuando corresponde.
+           - Solicitar datos adicionales (telf fijo/móvil, email si no tenemos uno) en todas confirmaciones y/o actualizaciones.
+           - SOLO se valora la SOLICITUD, no la correcta incorporación a BBDD (eso es Ítem 20).
+           - Excepciones (N/A o Pass si aplica): NO valora si ya dispone de >1 teléfono Y >1 email. NO valora si NO corresponde confirmación/actualización datos. Operativa NO aplica para autorizados expresos.
+           - Relación con Ítem 20: Correcta incorporación a BBDD -> Ítem 20. Este ítem es SOLO sobre la SOLICITUD.
+           """},
+    # Ítems Críticos Individuales
+    "17": { "name": "Tratamiento de la información con 3os", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Protección de información personal/contractual, evitando facilitarla a personas NO autorizadas.
+            - Penaliza facilitar info a NO autorizados.
+            - EXCEPCIONES (N/A si aplica): Si interviniente ESTÁ presente en llamada a 3. Si abogados personados en K+, NO necesita autorización (Pass).
+            - Relación con otros ítems: Sin relación directa relevante.
+            """},
+    "20": { "name": "Alta / Asignación datos (dirección teléfonos, etc.)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si el agente habla de dar de alta un dato nuevo necesario, o si discute un dato que NO debe darse de alta.
+            - Penaliza cuando se habla de dar de alta dato nuevo necesario que NO SE HACE (según conv.) o se habla de dar de alta dato que POR OPERATIVA NO DEBE incorporarse (ej. Comisaría).
+            - Si discute alta dato nuevo con error evidente en conv. (ej. CP erróneo), penaliza.
+            - NOTA IMPORTANTE: Evaluación SOLO basada en conversación. NO puedes verificar correcta ejecución en sistema K+.
+            - Relación con Ítem 21: Situaciones de alta con errores o datos no permitidos pueden valorarse en Ítem 21. En POC, si conversación muestra intento alta no permitido o alta con error evidente relacionado con dato *nuevo*, Fail Ítem 20.
+            """},
+    "26": { "name": "Ninguna amenaza o intimidación, ironía, frases inadecuadas. Sin provocaciones, sin juicios de valor", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Agente mantiene comportamiento respetuoso, profesional, SIN dañar imagen compañía.
+            - Evitar: NINGUNA amenaza/intimidación, NINGUNA ironía, NINGUNA frase inadecuada, SIN provocaciones, SIN juicios de valor. Enfócate en violaciones CLARAS Y GRAVES que dañan la imagen.
+            - Relación con Ítem 23 (Comunicación general): Mayoría problemas tono/comunicación penalizan Ítem 23. SOLO Ítem 26 si acción/lenguaje DAÑA CLARAMENTE IMAGEN o trato CRITICAMENTE INAPROPIADO/IRRESPECTUOSO según puntos listados.
+            """},
+}
+
+# --- Estructura de Evaluación (Define grupos e ítems individuales) ---
+EVALUATION_STRUCTURE = {
+    "inicio_llamada_group": {
+        "item_ids": ["1", "2", "3", "4", "5", "6", "7"],
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos de la llamada para determinar si el agente cumplió con los siguientes ítems del bloque "Inicio Llamada": {item_ids}.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Duración (mins): {call_duration}
+        Incidencia en K+ Reportada: {k_plus_incident}
+        Datos de Contacto 'VALIDO' en K+: {k_plus_valid_contacts}
+        ¿Tiene Flag Prescripción?: {has_prescription_flag}
+        ¿Flag Prescripción Reciente (<3m)?: {is_prescription_flag_recent}
+        Número Teléfonos en K+: {k_plus_phone_count}
+        Número Emails en K+: {k_plus_email_count}
+        ¿Corresponde Confirmación/Actualización de datos por operativa?: {corresponds_update}
+        ¿Interviniente es Autorizado Expreso?: {is_authorised_express}
+        Otros Datos K+ Relevantes (ej: DOB en sistema para Ítem 4): {k_plus_data}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación para cada Ítem:**
+        {all_items_rules_detail}
+
+        Evalúa cada uno de los ítems listados ({item_ids}) estrictamente basándote en la transcripción, los datos de la llamada y las reglas proporcionadas para CADA ÍTEM. Para el Ítem 6, ten en cuenta las excepciones por duración o incidencia (aunque la lógica de N/A se aplicará después, detecta el cumplimiento si aplicara).
+
+        Formato de Salida: Devuelve una lista de objetos JSON, uno por cada ítem evaluado en este grupo. CADA objeto JSON debe tener las claves "item_id", "result" ("Pass" | "Fail" | "N/A"), "reason" (explicación breve) y "transcript_segment" (fragmento relevante).
+
+        ```json
+        [
+          {{
+            "item_id": "1",
+            "result": "Pass" | "Fail" | "N/A",
+            "reason": "...",
+            "transcript_segment": "..."
+          }},
+          {{
+            "item_id": "2",
+            "result": "Pass" | "Fail" | "N/A",
+            "reason": "...",
+            "transcript_segment": "..."
+          }},
+          // ... y así para todos los ítems del grupo (3, 4, 5, 6, 7)
+        ]
+        ```
+        Asegúrate de que la salida sea una lista de objetos JSON válida.
+        """,
+    },
+     "item_17_individual": { # Ítem Individual 17
+        "item_ids": ["17"],
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y datos para evaluar el Ítem 17: Tratamiento de la Información con Terceros.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        ¿Está presente el interviniente en la llamada a 3?: {intervener_present_in_3way}
+        ¿Está el abogado personado en K+?: {lawyer_personado}
+
+        **Reglas de Evaluación (Ítem 17):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados. Enfócate en si se reveló información personal o contractual a alguien que no debía recibirla, considerando las excepciones.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "17",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando si se facilitó información a un tercero no autorizado o no, citando evidencia.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca N/A si la regla de excepción (interviniente presente o abogado personado) aplica según los datos.
+        """,
+    },
+    "item_20_individual": { # Ítem Individual 20
+         "item_ids": ["20"],
+         "prompt_template": """
+        Eres un evaluador de 
