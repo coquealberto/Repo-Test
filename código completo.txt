@@ -451,4 +451,752 @@ ITEM_RULES = {
     "1": { "name": "Saludo+Identificación (agente+empresa)", "complexity": "BAJO", "description": "...",
            "rules_detail": """
            Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
-     
+           - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+           - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+           - Excepciones y otras consideraciones: Si agente solo indica su nombre, se acepta. Si frase en diferente orden, se acepta.
+           - Relación con otros ítems: Sin relación directa.
+           """},
+    # ... COPIA AQUÍ LAS REGLAS PARA LOS ITEMS 2, 3, 4, 5, 6, 7, 17, 20, 26
+    # ASEGÚRATE DE ADAPTAR LAS REGLAS PARA REFERENCIAR LOS DATOS DE K+ (k_plus_data_snapshot)
+    # EJEMPLO ADAPTADO PARA ITEM 4:
+    "4": { "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Evalúa correcta identificación (Nombre Completo, DNI/NIE, Fecha Nacimiento) según tipo llamada.
+           - Llamadas Salientes: Nombre completo Y DNI/NIE completo.
+           - Llamadas Entrantes: Nombre completo + DNI/NIE completo + fecha nacimiento.
+           - Excepciones: NO informar motivo antes identificar. Solo 3 últimos DNI si NEGATIVA previa. Si **Fecha Nacimiento NO en k_plus_data_snapshot** Y valida por dirección (comparar con **k_plus_data_snapshot.direccion_valido**), correcto. IN por SMS/perdida donde agente da nombre: Válido si sigue resto (pide DNI/DOB). Autorizados sin DNI/NIE: Válido si facilitan cedente/producto/ref (comparar con **k_plus_data_snapshot.datos_contractuales**).
+           - Relación con Ítem 17: Si info contractual a NO interviniente (Ítem 4 Fail por persona incorrecta), fallo principal en Ítem 17.
+           """},
+    # EJEMPLO ADAPTADO PARA ITEM 6:
+     "6": { "name": "Confirmar datos contacto (dirección, teléfono, email)", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Valora si se confirman COMPLETOS todos los datos de contacto marcados "VALIDO" en K+.
+           - Válido SÓLO si se confirman, de manera COMPLETA, TODOS los datos de contacto "VALIDO" listados en **k_plus_data_snapshot (direccion_valido, telefonos_validos, emails_validos)** en la transcripción.
+           - EXCEPCIONES (gestionadas en código, LLM no evalúa si aplica): NO valora llamadas < 4 minutos. NO valora si incidencias K+ reportadas.
+           - Relación con Ítem 21: ... (mismas reglas, adaptadas si referencian K+ state)...
+           - Relación con Ítem 7: Solicitar datos adicionales DESPUÉS de confirmar datos sistema -> Ítem 7, NO Ítem 6.
+           """},
+     # EJEMPLO ADAPTADO PARA ITEM 20:
+    "20": { "name": "Alta / Asignación datos (dirección teléfonos, etc.)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si el agente habla de dar de alta un dato nuevo necesario, o si discute un dato que NO debe darse de alta, **Y si la evidencia en k_plus_data_snapshot sugiere que la acción se realizó correctamente o incorrectamente si se discutió en la llamada.**
+            - Penaliza cuando se habla de dar de alta dato nuevo necesario que NO SE HACE (según conv.) O se habla de dar de alta dato que POR OPERATIVA NO DEBE incorporarse (ej. Comisaría). **VERIFICAR en k_plus_data_snapshot los campos relevantes de estado de registro (ej. estado_registro_direccion_nueva_hablada_en_call, estado_registro_telefono_nuevo_hablado_en_call) para ver si el dato fue registrado y si el estado indica error o no registro cuando debía.**
+            - Si discute alta dato nuevo con error evidente en conv. (ej. CP erróneo), penaliza, **y si el estado en k_plus_data_snapshot confirma un registro erróneo.**
+            - Relación con Ítem 21: ... (mismas reglas, adaptadas si referencian K+ state)...
+            """},
+    # ... COPIA LAS REGLAS RESTANTES ADAPTADAS ...
+}
+
+
+# --- Estructura de Evaluación (Define grupos e ítems individuales) ---
+# Esta estructura define QUÉ se evalúa en CADA llamada al LLM.
+EVALUATION_STRUCTURE = {
+    "inicio_llamada_group": {
+        "item_ids": ["1", "2", "3", "4", "5", "6", "7"],
+        # Template para un grupo de ítems
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos proporcionados para determinar si el agente cumplió con los siguientes ítems del bloque "Inicio Llamada": {item_ids}.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Duración (mins): {call_duration}
+        Incidencia en K+ Reportada: {k_plus_incident}
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación para cada Ítem:**
+        {all_items_rules_detail}
+
+        Evalúa cada uno de los ítems listados ({item_ids}) estrictamente basándote en la transcripción, los DATOS DE K+ (k_plus_data_snapshot) y las reglas proporcionadas para CADA ÍTEM. Para el Ítem 6, ten en cuenta las excepciones por duración o incidencia.
+
+        Formato de Salida: Devuelve una lista de objetos JSON, uno por cada ítem evaluado en este grupo. CADA objeto JSON debe tener las claves "item_id", "result" ("Pass" | "Fail" | "N/A"), "reason" (explicación breve, citando evidencia de transcripción O datos de K+) y "transcript_segment" (fragmento relevante).
+
+        ```json
+        [
+          {{
+            "item_id": "1",
+            "result": "Pass" | "Fail" | "N/A",
+            "reason": "...",
+            "transcript_segment": "..."
+          }},
+          # ... y así para todos los ítems del grupo (2, 3, 4, 5, 6, 7)
+        ]
+        ```
+        Asegúrate de que la salida sea una lista de objetos JSON válida.
+        """,
+    },
+    "item_17_individual": {
+        "item_ids": ["17"],
+         # Template para un ítem individual
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y datos para evaluar el Ítem 17: Tratamiento de la Información con Terceros.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 17):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción y los DATOS DE K+ (k_plus_data_snapshot). Enfócate en si se reveló información personal o contractual a alguien que no debía recibirla, considerando las excepciones basadas en k_plus_data_snapshot.abogado_personado o si el interviniente estaba presente en llamada a 3 (según los datos).
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "17",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando si se facilitó información a un tercero no autorizado o no, citando evidencia de transcripción O datos de K+.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca N/A si la regla de excepción aplica según los datos.
+        """,
+    },
+     "item_20_individual": {
+         "item_ids": ["20"],
+          # Template para un ítem individual
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos proporcionados para determinar si el agente cumplió con el Ítem 20: Discusión/Intento de Alta/Asignación de Datos Nuevos.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 20):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción Y los DATOS DE K+ (k_plus_data_snapshot). Identifica si el agente discute o intenta dar de alta UN DATO *NUEVO* (dirección, teléfono, email, etc.) o si discute dar de alta un dato que POR OPERATIVA NO SE DEBE registrar (ej: teléfono de Comisaría). **CRUCIALMENTE, USA k_plus_data_snapshot para verificar si la acción de registro/actualización discutida parece haberse reflejado CORRECTAMENTE o INCORRECTAMENTE en el estado de K+ proporcionado.**
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "20",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación. Indica si se discutió o intentó dar de alta un dato nuevo y si parecía correcto en la conversación Y si el estado en k_plus_data_snapshot corrobora un registro correcto/incorrecto o falta de registro.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no se discute ningún alta o modificación de datos nuevos en la llamada.
+        """,
+    },
+    "item_26_individual": {
+         "item_ids": ["26"],
+          # Template para un ítem individual
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 26: Código Deontológico (Lenguaje y Comportamiento).
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        # Ítem 26 no necesita datos de K+ por sus reglas actuales, pero se incluyen por consistencia si fuera necesario a futuro.
+        # Estado de Datos en K+ (post-llamada): {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 26):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción. Busca evidencia de lenguaje o comportamiento del agente que sea una **violación clara y grave** del código deontológico. Enfócate en la presencia de amenazas, intimidación, ironía (si es clara por texto), frases inadecuadas, provocaciones, juicios de valor, o cualquier expresión que pueda dañar gravemente la imagen de la compañía.
+
+        Ignora aspectos de comunicación general (volumen, silencios, escucha activa). Solo penaliza aquí si la violación es **grave**.
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "26",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando el tipo de violación detectada y citando la evidencia de la transcripción.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no hay evidencia de ninguna de estas violaciones graves.
+        """,
+    }
+}
+
+# Las reglas detalladas de los ítems (ITEM_RULES) deben referenciar ahora
+# explícitamente los campos dentro del diccionario k_plus_data_snapshot
+# que se pasa en el prompt_data.
+# Por ejemplo, en ITEM_RULES["4"]["rules_detail"], en lugar de "Si fecha nacimiento no está en sistema",
+# ahora podrías poner "Si k_plus_data_snapshot.fecha_nacimiento está vacío o es nulo".
+# DEBES IR ITEM POR ITEM Y ADAPTAR LA REDACCIÓN DE LAS REGLAS EN ITEM_RULES
+# PARA INDICAR AL LLM CUANDO DEBE MIRAR LOS DATOS DE K+.
+
+src/evaluation/evaluator.py
+
+import json
+# Importar config_manager para obtener config API
+from src.config import config_manager
+# Importar reglas y estructura de evaluación
+from .item_rules import ITEM_RULES, EVALUATION_STRUCTURE
+# Importar AzureOpenAI client
+from openai import AzureOpenAI
+
+# Configurar el cliente OpenAI aquí o importarlo si ya está configurado globalmente
+# Esto asume que AZURE_OPENAI_ENDPOINT y AZURE_OPENAI_KEY están en .env o variables de entorno
+openai_client = AzureOpenAI(
+    azure_endpoint=config_manager.get_env("AZURE_OPENAI_ENDPOINT"),
+    api_key=config_manager.get_env("AZURE_OPENAI_KEY"),
+    api_version=config_manager.get("openai.api_version")
+)
+
+
+def evaluate_with_llm(evaluation_key: str, transcript: str, call_metadata: dict) -> list[dict]:
+    """
+    Evalúa un grupo de ítems o un ítem individual utilizando el LLM.
+
+    Args:
+        evaluation_key (str): La clave del grupo o ítem individual en EVALUATION_STRUCTURE.
+        transcript (str): La transcripción completa de la llamada.
+        call_metadata (dict): Metadatos de la llamada (incluyendo k_plus_data_snapshot).
+
+    Returns:
+        list[dict]: Lista de diccionarios con los resultados de evaluación para cada ítem(es) evaluado(s).
+                    Retorna una lista vacía o con resultados de error si falla.
+    """
+    evaluation_config = EVALUATION_STRUCTURE.get(evaluation_key)
+    if not evaluation_config:
+        print(f"Error: Evaluation config not found for key {evaluation_key}.")
+        return [{"item_id": "Error", "result": "Error", "reason": f"Configuración no encontrada para {evaluation_key}", "transcript_segment": ""}]
+
+    item_ids = evaluation_config["item_ids"]
+    prompt_template = evaluation_config["prompt_template"]
+
+    # Compilar las reglas detalladas para los ítems de este grupo/individual
+    all_items_rules_detail = ""
+    for item_id in item_ids:
+        if item_id in ITEM_RULES:
+            # Usar la descripción y reglas detalladas de ITEM_RULES
+            all_items_rules_detail += f"\n--- Ítem {item_id}: {ITEM_RULES[item_id]['name']} ---\n"
+            # all_items_rules_detail += f"Descripción: {ITEM_RULES[item_id]['description']}\n" # Opcional, si es útil para el LLM
+            all_items_rules_detail += ITEM_RULES[item_id]['rules_detail'] + "\n"
+        else:
+            all_items_rules_detail += f"\n--- Ítem {item_id}: Reglas NO DISPONIBLES ---\n"
+
+    # Preparar datos para el prompt. Asegurarse de incluir k_plus_data_snapshot.
+    prompt_data = {
+        "item_ids": ", ".join(item_ids),
+        "transcript": transcript,
+        "all_items_rules_detail": all_items_rules_detail,
+        # Incluir TODOS los metadatos y el snapshot de K+ que los templates o reglas puedan necesitar
+        "call_type": call_metadata.get("call_type", "Desconocido"),
+        "call_duration": call_metadata.get("duration", 0),
+        "k_plus_incident": call_metadata.get("k_plus_incident", False),
+        "intervener_present_in_3way": call_metadata.get("intervener_present_in_3way", False),
+        "lawyer_personado": call_metadata.get("lawyer_personado", False),
+        "k_plus_valid_contacts": call_metadata.get("k_plus_data_snapshot", {}).get("telefonos_validos", []) + call_metadata.get("k_plus_data_snapshot", {}).get("emails_validos", []) + ([call_metadata.get("k_plus_data_snapshot", {}).get("direccion_valido")] if call_metadata.get("k_plus_data_snapshot", {}).get("direccion_valido") else []), # Combinar validos para prompt 6 si es necesario
+        "has_prescription_flag": call_metadata.get("k_plus_data_snapshot", {}).get("tiene_flag_argumentario_prescripcion", False),
+        "prescription_flag_date": call_metadata.get("k_plus_data_snapshot", {}).get("fecha_flag_argumentario_prescripcion", "N/A"),
+         # Usar el dato calculado en data_loader para la lógica de Item 5
+        "is_prescription_flag_recent": call_metadata.get("is_prescription_flag_recent", False),
+        "k_plus_phone_count": call_metadata.get("k_plus_data_snapshot", {}).get("numero_telefonos_total_en_k", 0), # Usar total counts para Item 7
+        "k_plus_email_count": call_metadata.get("k_plus_data_snapshot", {}).get("numero_emails_total_en_k", 0), # Usar total counts para Item 7
+        # Estos dos simulan si por operativa tocaba confirmar/actualizar. Vienen de metadata, no K+ snapshot directo.
+        "corresponds_update": call_metadata.get("corresponds_update", False), # Dato a nivel de llamada/metadata
+        "is_authorised_express": call_metadata.get("is_authorised_express", False), # Dato a nivel de llamada/metadata
+        # Pasar el snapshot completo de K+
+        "k_plus_data_snapshot": json.dumps(call_metadata.get("k_plus_data_snapshot", {}), ensure_ascii=False) # Convertir a string JSON para el prompt
+
+        # NOTA: La preparación de prompt_data debe ser robusta. Asegurarse
+        # de que todas las claves que usa CUALQUIER prompt_template
+        # estén presentes, quizás con valores por defecto si no están en call_metadata.
+    }
+
+
+    # Formatear el prompt
+    try:
+        prompt = prompt_template.format(**prompt_data)
+    except KeyError as e:
+         print(f"Error formatting prompt for evaluation key {evaluation_key}: Missing key {e}")
+         # Retorna un resultado de error para cada ítem en el grupo/individual
+         return [{"item_id": item_id, "result": "Error", "reason": f"Error formatting prompt: Missing data {e}", "transcript_segment": ""} for item_id in item_ids]
+
+
+    messages = [
+        {"role": "system", "content": "You are an AI assistant specialized in analyzing call center transcripts for quality assurance based on predefined criteria for EOS Spain. Your task is to evaluate the specified compliance items based *strictly* on the provided transcript, call metadata, and evaluation rules. Use the K+ data snapshot provided to verify system state when rules require it. Respond ONLY with the requested JSON object or list of JSON objects."},
+        {"role": "user", "content": prompt}
+    ]
+
+    try:
+        # print(f"Sending prompt for {evaluation_key} ({item_ids})...") # Debugging print
+        # print(f"Prompt:\n{prompt}\n---\n") # Debugging print full prompt
+
+        response = openai_client.chat.completions.create(
+            model=config_manager.get("openai.deployment_name"),
+            messages=messages,
+            temperature=0, # Usar temperatura baja para resultados más deterministas
+            # max_tokens=... # Considerar ajustar si las transcripciones o prompts combinados son muy largos
+        )
+        llm_output_string = response.choices[0].message.content.strip()
+        # Limpiar posibles marcadores de código JSON
+        if llm_output_string.startswith("```json"):
+             llm_output_string = llm_output_string[len("```json"):].strip()
+             if llm_output_string.endswith("```"):
+                 llm_output_string = llm_output_string[:-len("```")].strip()
+
+        # Intentar parsear la respuesta. Debe ser una lista si es grupo, un dict si es individual.
+        parsed_output = json.loads(llm_output_string)
+
+        # Validar y estandarizar la salida
+        results = []
+        if evaluation_key.endswith("_group"): # Esperamos una lista para grupos
+            if isinstance(parsed_output, list):
+                for item_result in parsed_output:
+                    # Validación básica de cada objeto en la lista
+                    if isinstance(item_result, dict) and item_result.get('item_id') in item_ids and 'result' in item_result and 'reason' in item_result:
+                         if 'transcript_segment' not in item_result: item_result['transcript_segment'] = ""
+                         results.append(item_result)
+                    else:
+                         print(f"Warning: Malformed item result in list for {evaluation_key}: {json.dumps(item_result)[:100]}...")
+                         # Añadir un resultado de error para el ítem malformado si se puede identificar el item_id
+                         item_id_from_output = item_result.get('item_id', 'Unknown')
+                         if item_id_from_output not in item_ids: item_id_from_output = "Unknown"
+                         results.append({"item_id": item_id_from_output, "result": "Error", "reason": f"Malformed item output from LLM: {json.dumps(item_result)[:100]}...", "transcript_segment": ""})
+
+                # Verificar si faltan ítems en la respuesta del LLM para el grupo
+                returned_item_ids = {res.get('item_id') for res in results if isinstance(res, dict)}
+                missing_item_ids = set(item_ids) - returned_item_ids
+                for missing_id in missing_item_ids:
+                     print(f"Warning: LLM did not return result for item {missing_id} in group {evaluation_key}. Adding error result.")
+                     results.append({"item_id": missing_id, "result": "Error", "reason": "LLM did not return result for this item in the group.", "transcript_segment": ""})
+            else:
+                print(f"Warning: LLM output for group {evaluation_key} is not a list:\n{llm_output_string}")
+                # Retorna resultados de error para todos los ítems esperados si la salida es del tipo incorrecto
+                results = [{"item_id": item_id, "result": "Error", "reason": f"LLM output for group not list: {llm_output_string[:150]}...", "transcript_segment": llm_output_string} for item_id in item_ids]
+
+        else: # Esperamos un diccionario para ítems individuales
+             if isinstance(parsed_output, dict) and parsed_output.get('item_id') == item_ids[0] and 'result' in parsed_output and 'reason' in parsed_output:
+                  if 'transcript_segment' not in parsed_output: parsed_output['transcript_segment'] = ""
+                  results.append(parsed_output)
+             else:
+                  print(f"Warning: LLM output for individual item {evaluation_key} is not in expected format:\n{llm_output_string}")
+                  # Añadir un resultado de error para el ítem esperado
+                  results.append({"item_id": item_ids[0], "result": "Error", "reason": f"LLM output format error for individual item: {llm_output_string[:150]}...", "transcript_segment": llm_output_string})
+
+        return results
+
+    except json.JSONDecodeError:
+         print(f"Error decoding JSON from LLM output for {evaluation_key}:\n{llm_output_string}")
+         # Retorna resultados de error para todos los ítems esperados si falla el parsing
+         return [{"item_id": item_id, "result": "Error", "reason": f"JSON decoding error: {llm_output_string[:150]}...", "transcript_segment": llm_output_string} for item_id in item_ids]
+    except Exception as e:
+        print(f"Error calling Azure OpenAI API for {evaluation_key}: {e}")
+        # Retornar resultados de error para todos los ítems esperados si falla la API
+        return [{"item_id": item_id, "result": "Error", "reason": f"API error: {e}", "transcript_segment": ""} for item_id in item_ids]
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.evaluation import evaluate_with_llm, EVALUATION_STRUCTURE
+# # call_data ya cargado por data_loader
+# all_initial_results = []
+# for eval_key in EVALUATION_STRUCTURE.keys():
+#     item_results = evaluate_with_llm(eval_key, call_data['transcript'], call_data['call_metadata'])
+#     all_initial_results.extend(item_results)
+
+src/evaluation/postprocessor.py
+
+# Este archivo contiene la lógica de post-procesamiento para refinar los resultados del LLM.
+
+# Importar estructura de evaluación para saber qué ítems esperar
+from .item_rules import EVALUATION_STRUCTURE
+# Importar config_manager si la lógica de post-procesamiento necesita config
+from src.config import config_manager
+
+def apply_post_processing(initial_results: list[dict], call_metadata: dict) -> list[dict]:
+    """
+    Aplica lógica de post-procesamiento para manejar excepciones complejas
+    y relaciones entre ítems, usando los resultados iniciales del LLM y metadatos.
+
+    Args:
+        initial_results (list[dict]): Lista aplanada de resultados iniciales de CADA ítem.
+        call_metadata (dict): Metadatos de la llamada (incluyendo k_plus_data_snapshot).
+
+    Returns:
+        list[dict]: Lista de resultados finales ajustados.
+    """
+    results_map = {res['item_id']: res for res in initial_results}
+    final_results = []
+
+    # Compilar la lista de todos los item_ids que esperábamos evaluar
+    all_expected_item_ids = [id for group_config in EVALUATION_STRUCTURE.values() for id in group_config['item_ids']]
+    processed_item_ids = set() # Para rastrear ítems ya procesados/añadidos a final_results
+
+    print("Applying post-processing rules...")
+
+    # Iterar sobre los ítems esperados para asegurar que todos sean considerados
+    for item_id in all_expected_item_ids:
+        if item_id in processed_item_ids:
+            continue # Ya procesado como parte de una regla de dependencia
+
+        original_result = results_map.get(item_id)
+
+        # Si un resultado esperado no fue generado por el LLM (ej. error de API o parsing grave),
+        # creamos un resultado de error por defecto para este ítem.
+        if original_result is None:
+             original_result = {"item_id": item_id, "result": "Error", "reason": "Resultado no generado por LLM (API o parsing error).", "transcript_segment": ""}
+             print(f"Warning: Result for item {item_id} was not found in initial results. Adding default error.")
+
+        adjusted_result = original_result.copy() # Trabajar sobre una copia
+
+
+        # --- Lógica de Post-Procesamiento Específica ---
+        # Esto es donde aplicarías las reglas de negocio que ajustan
+        # el resultado de un ítem basándose en otro, o reglas que no se
+        # pudieron implementar completamente en el prompt.
+
+        # Ejemplo: Ítem 6 - Excepciones por duración o incidencia K+
+        # Aunque el prompt instruye al LLM, la regla oficial dice que NO SE VALORA
+        # si duración < 4 mins o hay incidencia K+. La lógica más robusta
+        # para asegurar que es N/A es aplicarla aquí *después* de la evaluación LLM.
+        if item_id == "6":
+             duration = call_metadata.get("duration", 0)
+             k_plus_incident = call_metadata.get("k_plus_incident", False)
+             if duration < 4:
+                  adjusted_result['result'] = "N/A"
+                  adjusted_result['reason'] = "Llamada de duración inferior a 4 minutos (regla post-proceso)."
+             elif k_plus_incident:
+                  adjusted_result['result'] = "N/A"
+                  adjusted_result['reason'] = "Incidencia reportada en K+ para esta llamada (regla post-proceso)."
+
+        # Ejemplo: Relación Ítem 4 (Identificación) e Ítem 17 (Info a 3os)
+        # La regla dice "Si quien llama no es el interviniente y se facilita información del contrato, se valorará en este item (17)".
+        # Esto implica que si Ítem 4 falló porque NO SE IDENTIFICÓ al interviniente CORRECTO, Y Ítem 17 falló porque SE DIO INFO,
+        # la penalización principal por la "fuga" es Ítem 17.
+        # Podrías, por ejemplo, ajustar la razón del fallo de Ítem 4 para aclarar esto.
+        # Esta lógica es compleja y depende de la *razón específica* del fallo en Ítem 4.
+        # requires_17_check_reason = ["Failed identification, incorrect person suspected", ...] # Definir las razones clave
+        # if item_id == "4" and adjusted_result['result'] == "Fail" and adjusted_result['reason'] in requires_17_check_reason:
+        #      item_17_result = results_map.get("17")
+        #      if item_17_result and item_17_result['result'] == "Fail":
+        #           adjusted_result['reason'] += " (Principal fallo de fuga de info cubierto por Ítem 17)."
+        # Para POC, podemos omitir esta complejidad y dejar que ambos ítems fallen si aplica, y el revisor humano gestione la superposición.
+
+
+        # Ejemplo: Ítem 20 - Notas o validaciones EXTRA post-LLM si fueran necesarias
+        # (Aunque el LLM ya usa K+, podrías querer añadir una capa extra de validación aquí si la lógica es muy compleja)
+        # O simplemente asegurar que la razón es clara.
+        if item_id == "20":
+             # Con datos de K+ para el LLM, la nota de limitación ya no es tan crítica,
+             # pero podrías añadir una nota si el resultado es "Fail" o "N/A" para
+             # recordar al revisor que la verificación se basó en los datos de K+ proporcionados.
+             # Si el LLM ya lo hizo bien con el prompt, no necesitas ajustar mucho aquí.
+             pass # No adjustments needed based on current rules with K+ data to LLM
+
+
+        # Añadir otras reglas de post-procesamiento aquí según sea necesario
+
+
+        final_results.append(adjusted_result)
+        processed_item_ids.add(item_id) # Marcar como procesado
+
+    # Asegurarse de que no haya ítems duplicados si se procesó algo inesperadamente
+    # (Esto no debería pasar si se itera sobre all_expected_item_ids y se usa processed_item_ids)
+    # return list({res['item_id']: res for res in final_results}.values()) # Forma alternativa para asegurar unicidad si hay dudas
+
+    # Opcional: Ordenar la lista final por item_id para una salida consistente
+    try:
+        final_results = sorted(final_results, key=lambda x: int(x.get('item_id', 999))) # Ordenar por ID numérico
+    except ValueError:
+        pass # Ignorar si hay IDs no numéricos
+
+    return final_results
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.evaluation import apply_post_processing
+# # all_initial_results obtenidos de las llamadas a evaluate_with_llm
+# # call_data ya cargado
+# final_evaluation_results = apply_post_processing(all_initial_results, call_data['call_metadata'])
+
+src/resulta/results_handler.py
+
+import os
+import json
+import csv
+
+# Importar config_manager para obtener rutas de salida
+from src.config import config_manager
+
+def save_evaluation_results_to_json(results: list[dict], output_filename: str):
+    """Guarda una lista plana de resultados de ítems en un archivo JSON."""
+    output_dir = config_manager.get("data_paths.results")
+    output_filepath = os.path.join(output_dir, output_filename)
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\n--- Saving Results ---")
+    print(f"Saving results to JSON: {output_filepath}")
+
+    try:
+        with open(output_filepath, 'w', encoding='utf-8') as f:
+            json.dump(results, f, indent=4, ensure_ascii=False)
+        print("Results saved successfully.")
+        return output_filepath
+    except Exception as e:
+        print(f"Error saving results to JSON {output_filepath}: {e}")
+        return None
+
+def save_evaluation_results_to_csv(results: list[dict], output_filename: str):
+    """Guarda una lista plana de resultados de ítems en un archivo CSV."""
+    output_dir = config_manager.get("data_paths.results")
+    output_filepath = os.path.join(output_dir, output_filename)
+    os.makedirs(output_dir, exist_ok=True)
+
+    print(f"\n--- Saving Results ---")
+    print(f"Saving results to CSV: {output_filepath}")
+
+    if not results:
+        print("No results to save.")
+        return None
+
+    # Determinar los campos del CSV (usando las claves del primer resultado como encabezado)
+    fieldnames = list(results[0].keys()) # Asume que todos los resultados tienen las mismas claves
+
+    try:
+        with open(output_filepath, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            writer.writerows(results)
+        print("Results saved successfully.")
+        return output_filepath
+    except Exception as e:
+        print(f"Error saving results to CSV {output_filepath}: {e}")
+        return None
+
+
+# Puedes añadir otras funciones para guardar en BBDD, etc.
+
+# Ejemplo de cómo se usaría en main_workflow:
+# from src.results import results_handler
+# # final_evaluation_results es una lista plana de resultados de ítems
+# results_handler.save_evaluation_results_to_json(final_evaluation_results, "evaluation_results_batch_X.json")
+# results_handler.save_evaluation_results_to_csv(final_evaluation_results, "evaluation_results_batch_X.csv")
+
+src/main_workflow.py
+
+# Este es el script principal que orquesta el pipeline.
+import os
+import glob # Para encontrar archivos de datos por patrón
+
+# Importar módulos del proyecto
+from src.config import config_manager
+from src.data_acquisition import downloader # Usado solo como placeholder
+from src.audio_processing import whisper_processor # Usado solo si use_whisper es True
+from src.data_preparation import data_loader
+from src.evaluation import evaluate_with_llm, apply_post_processing, EVALUATION_STRUCTURE
+from src.results import results_handler
+
+def main():
+    """
+    Función principal que ejecuta el pipeline de evaluación.
+    """
+    print("--- Starting Automated Call Evaluation Pipeline ---")
+
+    # 1. Cargar Configuración
+    # La instancia Singleton ya se carga al importar config_manager
+    config = config_manager # Usar la instancia global
+
+    # Obtener rutas de datos y configuración del pipeline
+    data_paths = config.get("data_paths")
+    pipeline_config = config.get("pipeline")
+
+    if not data_paths or not pipeline_config:
+        print("Error: Failed to load essential configuration. Exiting.")
+        return
+
+    # Asegurar directorios de resultados existen
+    os.makedirs(data_paths["results"], exist_ok=True)
+    # Asegurar directorios de datos locales para POC
+    os.makedirs(data_paths["raw_calls"], exist_ok=True)
+    os.makedirs(data_paths["raw_transcripts"], exist_ok=True)
+    os.makedirs(data_paths["whisper_transcripts"], exist_ok=True)
+    os.makedirs(data_paths["k_plus_data"], exist_ok=True)
+
+
+    # 2. Adquisición de Datos (Simulación para POC)
+    # En una implementación real, esto descargaría archivos
+    # downloader.download_calls(date_range=("2023-01-01", "2023-01-31"))
+    print("\nStep 2: Data Acquisition (Simulated)")
+    # Para la POC, nos saltamos la descarga real y asumimos que los archivos
+    # (audios si usas whisper, transcripciones iniciales, datos K+)
+    # están en sus directorios correspondientes o usaremos dummy data.
+    print("Assuming data files are already in local data directories for the POC.")
+
+    # --- CREAR DATOS DUMMY LOCALES PARA LA EJECUCIÓN SI NO EXISTEN ---
+    # Esta parte solo para la demo, en real la reemplazarías por tu carga.
+    # Crea archivos dummy en los directorios esperados para que data_loader los encuentre.
+    # Requiere la lógica de load_call_data del paso anterior (la dummy data generation parte)
+    # para crear los archivos dummy. Podrías mover esa lógica a un script de setup o a data_loader mismo.
+    # Por ahora, simplemente listaremos los archivos dummy que data_loader pueda generar.
+    dummy_call_ids = ["call_001", "call_002", "call_003", "call_004"] # Los IDs de las llamadas dummy
+
+    # Simular la creación de archivos dummy si no existen (para que el loader no falle)
+    print("Creating dummy data files if they don't exist...")
+    # Lógica simplificada para crear un archivo dummy por cada ID en los directorios
+    for call_id in dummy_call_ids:
+         dummy_transcript_path_whisper = os.path.join(data_paths["whisper_transcripts"], f"{call_id}.txt")
+         dummy_kplus_path = os.path.join(data_paths["k_plus_data"], f"{call_id}.json")
+
+         if not os.path.exists(dummy_transcript_path_whisper):
+              with open(dummy_transcript_path_whisper, 'w', encoding='utf-8') as f:
+                   f.write(f"Simulated Whisper transcript for {call_id}.")
+         if not os.path.exists(dummy_kplus_path):
+              # Usar una estructura básica de K+ data snapshot
+              dummy_kplus_data = {
+                "call_id": call_id,
+                "call_type": "Saliente" if call_id == "call_001" else "Entrante",
+                "duration": 3.5 if call_id == "call_002" else 7, # Simula duración para Item 6
+                "k_plus_incident": False if call_id != "call_002" else True, # Simula incidente K+
+                "intervener_present_in_3way": False if call_id != "call_003" else True,
+                "lawyer_personado": False,
+                "corresponds_update": True if call_id == "call_001" or call_id == "call_003" else False,
+                "is_authorised_express": False,
+                "k_plus_data_snapshot": {
+                    "direccion_valido": f"C/ Falsa {call_id.split('_')[1]}",
+                    "telefonos_validos": [f"555-{call_id.split('_')[1]}00"],
+                    "emails_validos": [f"test{call_id}@example.com"] if call_id != "call_001" else [],
+                    "fecha_nacimiento": "1980-01-01" if call_id != "call_004" else None,
+                    "dni_nie_completo": f"123456{call_id.split('_')[1]}B",
+                    "abogado_personado": False,
+                     "tiene_flag_argumentario_prescripcion": True if call_id in ["call_003", "call_004"] else False,
+                    "fecha_flag_argumentario_prescripcion": "2024-04-01" if call_id == "call_003" else "2023-01-01" if call_id == "call_004" else None, # Para Item 5
+                     "estado_registro_direccion_nueva_hablada_en_call": "Correctamente Registrada C/ Nueva X" if call_id == "call_003" else None, # Para Item 20
+                     "estado_registro_telefono_nuevo_hablado_en_call": "No Registrado" if call_id == "call_001" else None, # Para Item 20
+                     "estado_registro_email_nuevo_hablado_en_call": "No Registrado" if call_id == "call_001" else None, # Para Item 20
+                     "numero_telefonos_total_en_k": 1 if call_id != "call_001" else 2, # Para Item 7
+                     "numero_emails_total_en_k": 0 if call_id == "call_001" else 1, # Para Item 7
+                }
+              }
+              # Calcular is_prescription_flag_recent para el dummy data loader
+              today_for_dummy = datetime.now() # Usar fecha actual para esta simulación
+              flag_date_str_dummy = dummy_kplus_data["k_plus_data_snapshot"].get("fecha_flag_argumentario_prescripcion")
+              is_flag_recent_dummy = False
+              if flag_date_str_dummy:
+                 try:
+                     flag_date_dummy = datetime.strptime(flag_date_str_dummy, "%Y-%m-%d")
+                     if today_for_dummy - flag_date_dummy < timedelta(days=90):
+                          is_flag_recent_dummy = True
+                 except (ValueError, TypeError):
+                     pass
+              dummy_kplus_data["is_prescription_flag_recent"] = is_flag_recent_dummy # Añadirlo al metadata principal
+              with open(dummy_kplus_path, 'w', encoding='utf-8') as f:
+                   json.dump(dummy_kplus_data, f, indent=4, ensure_ascii=False)
+
+    print("Dummy data files are ready.")
+
+
+    # 3. Procesamiento de Audio (Whisper) - Condicional
+    # En la POC, si use_whisper es True, asumimos que ya tienes los archivos .wav y los procesas.
+    # Si use_whisper es False, te saltas este paso y usas raw_transcripts.
+    use_whisper = pipeline_config.get("use_whisper", False)
+    transcripts_to_load_dir = data_paths["raw_transcripts"] # Directorio por defecto
+
+    if use_whisper:
+        print("\nStep 3: Audio Processing (Whisper)")
+        raw_calls_dir = data_paths["raw_calls"]
+        # Encontrar archivos de audio a procesar (ej. .wav o .mp3)
+        # Aquí listarías los archivos descargados por downloader
+        audio_files_to_process = glob.glob(os.path.join(raw_calls_dir, "*.wav")) + glob.glob(os.path.join(raw_calls_dir, "*.mp3"))
+
+        if audio_files_to_process:
+            processed_audio_files = whisper_processor.process_audio_batch(audio_files_to_process)
+            if processed_audio_files:
+                transcripts_to_load_dir = data_paths["whisper_transcripts"] # Usar dir de Whisper si se procesó
+                print(f"Whisper processing completed. Using transcripts from {transcripts_to_load_dir}")
+            else:
+                print("Whisper processing failed or returned no files. Fallback to raw transcripts (if available).")
+                transcripts_to_load_dir = data_paths["raw_transcripts"] # Fallback
+        else:
+            print(f"No audio files found in {raw_calls_dir} to process with Whisper. Using raw transcripts (if available).")
+            transcripts_to_load_dir = data_paths["raw_transcripts"] # No audio found
+
+    else:
+        print("\nStep 3: Audio Processing (Skipped)")
+        print(f"Using raw transcripts from {transcripts_to_load_dir} as per configuration.")
+
+
+    # 4. Carga de Datos para Evaluación
+    print("\nStep 4: Data Loading for Evaluation")
+    # Identificar las llamadas a evaluar. Podría ser por archivos en el directorio de K+ data,
+    # o una lista específica obtenida de otra fuente.
+    # Para la POC, usamos los IDs de los archivos dummy que esperamos encontrar.
+    # En real, podrías listar archivos JSON en data/k_plus_data/ o TXT en el dir de transcripciones.
+    call_ids_to_evaluate = [os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(data_paths["k_plus_data"], "*.json"))]
+    if not call_ids_to_evaluate:
+         print("No calls identified for evaluation based on available K+ data files. Exiting.")
+         return
+
+
+    all_evaluation_results_flat = [] # Lista plana para todos los resultados de todos los ítems/llamadas
+
+    for call_id in call_ids_to_evaluate:
+        # Cargar datos para la llamada actual
+        call_data = data_loader.load_call_data_for_evaluation(call_id, use_whisper=use_whisper if use_whisper else False) # Pasar el flag si se usó whisper
+
+        if not call_data or not call_data.get("transcript"):
+            print(f"Skipping evaluation for call {call_id} due to data loading error or missing transcript.")
+            # Opcional: Añadir resultados de "N/A" o "Error" para esta llamada y todos sus ítems esperados
+            all_item_ids = [id for group in EVALUATION_STRUCTURE.values() for id in group['item_ids']]
+            error_results = [{"item_id": item_id, "result": "Error", "reason": "Failed to load transcript or data.", "transcript_segment": ""} for item_id in all_item_ids]
+            all_evaluation_results_flat.extend(error_results)
+            continue
+
+        # 5. Evaluación con LLM
+        print(f"\nStep 5: Evaluation for call {call_id}")
+        initial_results_for_call = []
+        # Iterar sobre la estructura de evaluación (grupos e ítems individuales)
+        eval_structure_keys = pipeline_config.get("items_to_evaluate", EVALUATION_STRUCTURE.keys()) # Usar config o evaluar todos
+
+        for evaluation_key in eval_structure_keys:
+             if evaluation_key not in EVALUATION_STRUCTURE:
+                  print(f"Warning: Evaluation key '{evaluation_key}' from config not found in EVALUATION_STRUCTURE. Skipping.")
+                  continue
+
+             item_ids_in_group = EVALUATION_STRUCTURE[evaluation_key]["item_ids"]
+             print(f"  Evaluating group/item: {evaluation_key} ({item_ids_in_group})")
+
+             # Llamada a la función de evaluación con LLM
+             group_results = evaluate_with_llm(evaluation_key, call_data['transcript'], call_data['call_metadata'])
+             initial_results_for_call.extend(group_results) # Añadir todos los resultados (puede ser 1 o varios)
+
+
+        # 6. Post-Procesamiento
+        print(f"\nStep 6: Post-Processing for call {call_id}")
+        final_results_for_call = apply_post_processing(initial_results_for_call, call_data['call_metadata'])
+        all_evaluation_results_flat.extend(final_results_for_call) # Añadir los resultados finales de la llamada a la lista plana global
+
+
+    # 7. Guardar Resultados
+    print("\nStep 7: Saving Results")
+    if all_evaluation_results_flat:
+        # Guardar en JSON
+        results_handler.save_evaluation_results_to_json(all_evaluation_results_flat, "evaluation_output.json")
+        # Guardar en CSV (si necesitas)
+        # results_handler.save_evaluation_results_to_csv(all_evaluation_results_flat, "evaluation_output.csv")
+    else:
+        print("No evaluation results generated to save.")
+
+
+    print("\n--- Automated Call Evaluation Pipeline Finished ---")
+
+
+# Punto de entrada del script
+if __name__ == "__main__":
+    # Esto permite ejecutar el main_workflow directamente
+    main()
+
+project_root/scripts/run_pipeline.py
+
+import os
+import sys
+
+# Añadir el directorio raíz del proyecto al PYTHONPATH para poder importar módulos
+project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+sys.path.insert(0, project_root)
+
+# Importar la función main del main_workflow
+from src.main_workflow import main
+
+if __name__ == "__main__":
+    # Aquí podrías añadir argumentos de línea de comandos si quieres
+    # Por ejemplo, para pasar un rango de fechas, IDs específicos, etc.
+    # import argparse
+    # parser = argparse.ArgumentParser(description="Run the call evaluation pipeline.")
+    # parser.add_argument("--date-range", help="Date range to process (YYYY-MM-DD,YYYY-MM-DD)")
+    # args = parser.parse_args()
+
+    # Ejecutar la función principal
+    main()
