@@ -1,0 +1,1089 @@
+Okay, vamos a integrar la lógica de descarga de transcripciones de Genesys Cloud en la nueva estructura de tu proyecto.
+Desbloquearemos la llamada en main_workflow.py y adaptaremos el código que proporcionaste para que funcione como el módulo downloader.py dentro de src/data_acquisition/.
+Necesitaremos realizar los siguientes pasos:
+ * Actualizar requirements.txt: Añadir las librerías requests y pytz.
+ * Actualizar .env: Asegurar que las credenciales de Genesys estén ahí.
+ * Actualizar config/settings.yaml: Mover la configuración de Genesys (entorno, parámetros de búsqueda, formato de fecha, etc.) desde el JSON auxiliar y variables de entorno al archivo YAML. También añadir el rango de fechas a procesar.
+ * Crear/Adaptar GenesysCloudClient: Mover la clase al nuevo proyecto, probablemente dentro de downloader.py o un nuevo módulo api_clients. La adaptaremos para que use el config_manager.
+ * Implementar downloader.py: Crear la función download_transcriptions_batch (o similar) que encapsule la lógica principal de descarga, tomando el rango de fechas y usando el GenesysCloudClient. Esta función deberá guardar los archivos en el directorio data/raw_transcripts/ especificado por el config_manager.
+ * Actualizar main_workflow.py: Descomentar la llamada a downloader.download_calls (cambiaremos el nombre a download_transcriptions_batch) y ajustar cómo se obtiene el rango de fechas. Esta función download_transcriptions_batch deberá retornar la lista de IDs de llamadas o rutas de archivos descargados para que el data_loader sepa qué procesar.
+ * Actualizar data_loader.py: Asegurar que pueda leer las transcripciones crudas (.json tal como las descarga Genesys) desde data/raw_transcripts/.
+Importante: El código antiguo usaba módulos auxiliares como logging_config, file_management y utilities. Los reemplazaremos por funciones básicas (ej. print para logging, json.dump para guardar archivos) para mantener la simplicidad de la POC. Un sistema de logging más robusto (usando el módulo logging de Python) debería implementarse en un proyecto real.
+1. Actualizar project_root/requirements.txt
+Añade las siguientes líneas:
+openai>=1.0.0
+python-dotenv>=1.0.0
+PyYAML>=6.0
+requests>=2.0.0 # Añadir
+pytz>=2023.0 # Añadir
+# Si usas pandas para K+ data:
+# pandas>=2.0.0
+
+2. Actualizar project_root/.env
+Asegúrate de añadir tus credenciales de Genesys Cloud aquí:
+# Variables de entorno para configuración sensible
+
+AZURE_OPENAI_ENDPOINT="YOUR_AZURE_ENDPOINT"
+AZURE_OPENAI_KEY="YOUR_AZURE_KEY"
+
+# Credenciales de Genesys Cloud
+GENESYS_CLOUD_CLIENT_ID="YOUR_GENESYS_CLIENT_ID"
+GENESYS_CLOUD_CLIENT_SECRET="YOUR_GENESYS_CLIENT_SECRET"
+
+3. Actualizar project_root/config/settings.yaml
+Añade la configuración de Genesys y los parámetros de búsqueda. Moveremos el contenido del JSON Json-Transcripts-iso.json aquí.
+# Configuración general del proyecto
+
+# Configuración Azure OpenAI
+openai:
+  deployment_name: "TU_GPT_DEPLOYMENT_NAME"
+  api_version: "2024-02-15-preview"
+
+# Rutas de directorios (relativas a project_root o absolutas)
+data_paths:
+  base: "data/"
+  raw_calls: "data/raw_calls/"
+  raw_transcripts: "data/raw_transcripts/" # Directorio de salida para las transcripciones descargadas
+  whisper_transcripts: "data/whisper_transcripts/"
+  k_plus_data: "data/k_plus_data/"
+  results: "results/"
+
+# Configuración del pipeline
+pipeline:
+  use_whisper: false # true para usar transcripciones Whisper, false para raw
+  items_to_evaluate:
+    - "inicio_llamada_group"
+    - "item_17_individual"
+    - "item_20_individual"
+    - "item_26_individual"
+  # Rango de fechas para descargar (formato YYYY-MM-DD)
+  download_date_range:
+    start_date: "2024-04-25"
+    end_date: "2024-04-25"
+  download_date_format: "YYYY-MM-DD" # Formato esperado para las fechas de arriba
+  download_timezone: "Europe/Madrid" # Zona horaria para las fechas
+
+# Configuración de la fuente de datos Genesys Cloud
+genesys_cloud:
+  environment: "mypurecloud.com" # O tu entorno Genesys
+  download:
+    step_minutes: 60 # Duración de cada intervalo para la consulta (en minutos)
+    max_retries: 3   # Máximo de intentos de reintento para descargas individuales
+    retry_delay: 2   # Tiempo de espera entre reintentos (en segundos)
+    # Parámetros de búsqueda para la API de transcripciones (Adaptado del JSON original)
+    search_query_params:
+      types: ["transcripts"]
+      returnFields: ["conversationId", "communicationId", "duration", "startTime"]
+      query:
+        - type: "EXACT"
+          fields: ["language"]
+          value: "es-es"
+        - type: "EXACT"
+          fields: ["mediaType"]
+          value: "call"
+        - type: "GREATER_THAN"
+          fields: ["duration"]
+          value: "15000" # Duración mínima en milisegundos
+        # La parte DATE_RANGE será actualizada dinámicamente por el downloader
+        # {
+        #   type: "DATE_RANGE",
+        #   fields: ["conversationStartTime"],
+        #   startValue: "...", # Formato dinámico (ej. "2024-04-25T00:00:00.000Z")
+        #   endValue: "...",   # Formato dinámico
+        #   dateFormat: "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX" # O el formato que necesite la API
+        # }
+      pageSize: 100 # Tamaño de página para la API
+      # pageNumber será gestionado por la paginación en el código
+
+
+# ... otras secciones de configuración
+
+4. Implementar src/data_acquisition/downloader.py
+Crearemos la clase GenesysCloudClient dentro de este archivo y la función download_transcriptions_batch que usará esta clase. Reemplazamos las funciones de logging/file_management antiguas con básicas de Python.
+
+
+import os
+import sys
+import time
+import json # Necesario para guardar el JSON descargado
+import base64
+from datetime import timedelta, datetime
+from pytz import timezone # Importar timezone
+
+import requests # Importar requests
+
+# Importar config_manager para obtener configuración
+from src.config import config_manager
+
+# --- Clases y funciones de utilidad (Adaptadas del código antiguo) ---
+
+# Reemplazamos el logging_config y log_interaction con prints simples para la POC
+def log_interaction(step, status, message, details=None):
+    """Simulación básica de logging."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"[{timestamp}] [{step}] [{status}] {message}"
+    if details:
+        log_message += f" Details: {details}"
+    print(log_message) # En una implementación real, usar el módulo logging
+
+# Reemplazamos write_json_file
+def write_json_file_simple(data, filepath):
+    """Guarda un diccionario en un archivo JSON."""
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        # log_interaction('write_json_file', 'Success', f'File saved: {filepath}') # Usar si tuvieras log_interaction real
+        return True
+    except Exception as e:
+        log_interaction('write_json_file', 'Failure', f'Failed to save file: {filepath}', {"error": str(e)})
+        return False
+
+# Eliminamos load_json, format_date, setup_logging y utilities ya que config_manager y datetime nativo los reemplazan
+
+class GenesysCloudClient:
+    """
+    Cliente para interactuar con la API de Genesys Cloud (Adaptado).
+
+    Gestiona la autenticación y recuperación de detalles de conversaciones y transcripciones.
+    """
+
+    def __init__(self, client_id, client_secret, environment):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.environment = environment
+        self.access_token = None
+        self.auth_url = f"https://login.{self.environment}/oauth/token"
+        self.search_url = f"https://api.{self.environment}/api/v2/speechandtextanalytics/transcripts/search"
+        self.transcript_url_template = f"https://api.{self.environment}/api/v2/speechandtextanalytics/conversations/{{conversation_id}}/communications/{{communication_id}}/transcripturl"
+
+    def authenticate(self):
+        """
+        Autentica al cliente usando credenciales para obtener un token de acceso.
+        """
+        log_interaction('authenticate', 'Attempt', 'Attempting to authenticate with Genesys Cloud.')
+        try:
+            authorization = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+            headers = {
+                "Authorization": f"Basic {authorization}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            data = {"grant_type": "client_credentials"}
+            response = requests.post(self.auth_url, data=data, headers=headers)
+            response.raise_for_status()
+            self.access_token = response.json()['access_token']
+            log_interaction('authenticate', 'Success', 'Access token generated.')
+            return self.access_token
+        except Exception as e:
+            log_interaction('authenticate', 'Failure', f'Failed to authenticate.', {"error": str(e)})
+            self.access_token = None # Asegurarse de que el token es None en caso de fallo
+            return None
+
+    def search_transcripts_in_interval(self, search_query_params, start_time_iso, end_time_iso):
+        """
+        Realiza la búsqueda de transcripciones para un intervalo de tiempo específico.
+        Maneja paginación y reintentos básicos a nivel de batch.
+        """
+        if not self.access_token:
+             log_interaction('search_transcripts', 'Failure', 'Authentication failed. No access token.')
+             return []
+
+        all_results = []
+        page_number = 1
+        total_pages = None
+        search_query = search_query_params.copy() # Usar una copia para modificar el rango de fecha y paginación
+
+        # Encontrar y actualizar el filtro DATE_RANGE
+        date_range_filter_found = False
+        for query_filter in search_query.get('query', []):
+            if query_filter.get('type') == 'DATE_RANGE' and 'conversationStartTime' in query_filter.get('fields', []):
+                query_filter['startValue'] = start_time_iso
+                query_filter['endValue'] = end_time_iso
+                # Asegurar que el formato de fecha también está en la query o se especifica aquí si la API lo requiere fijo
+                # query_filter['dateFormat'] = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX" # Asegurar que esto coincide con la API y start/end_time_iso
+                date_range_filter_found = True
+                break # Solo esperamos un filtro de rango de fechas por conversaciónStartTime
+
+        if not date_range_filter_found:
+             log_interaction('search_transcripts', 'Error', 'DATE_RANGE filter for conversationStartTime not found in search_query_params.')
+             return [] # No se puede buscar sin el filtro de fecha
+
+
+        log_interaction('search_transcripts', 'Attempt', f'Searching for transcripts from {start_time_iso} to {end_time_iso}')
+        # print(f"Search query for interval: {json.dumps(search_query)}") # Debugging print
+
+
+        while total_pages is None or page_number <= total_pages:
+            search_query['pageNumber'] = page_number
+
+            try:
+                response = requests.post(self.search_url, json=search_query, headers={"Authorization": f"Bearer {self.access_token}"})
+                response.raise_for_status()
+                result = response.json()
+                all_results.extend(result.get("results", []))
+
+                if total_pages is None:
+                    total_hits = result.get("total", 0)
+                    total_pages = result.get('pageCount', 1)
+                    log_interaction('search_transcripts', 'Info', f'Total transcripts found in interval: {total_hits}. Total pages: {total_pages}')
+
+                page_number += 1
+
+            except requests.exceptions.RequestException as e:
+                log_interaction('search_transcripts', 'Failure', f'Request failed for page {page_number}.', {"error": str(e)})
+                # Implementar reintento o manejo de error a nivel de página/batch si es necesario
+                # Por ahora, simplemente registramos el error y rompemos el bucle para este intervalo
+                break # Rompe el bucle de paginación para este intervalo si falla una página
+            except Exception as e:
+                 log_interaction('search_transcripts', 'Failure', f'An unexpected error occurred processing page {page_number}.', {"error": str(e)})
+                 break # Rompe el bucle por otros errores
+
+
+        log_interaction('search_transcripts', 'Success', f'Finished searching interval. Found {len(all_results)} results.')
+        return all_results
+
+    def get_transcript_url(self, conversation_id, communication_id):
+        """
+        Obtiene la URL de descarga de la transcripción para una conversación y comunicación.
+        """
+        if not self.access_token:
+             log_interaction('get_transcript_url', 'Failure', 'Authentication failed. No access token.')
+             return None, False
+
+        url = self.transcript_url_template.format(conversation_id=conversation_id, communication_id=communication_id)
+        log_interaction('get_transcript_url', 'Attempt', f'Getting download URL for conversation {conversation_id}, communication {communication_id}')
+        try:
+            response = requests.get(url, headers={"Authorization": f"Bearer {self.access_token}"})
+            response.raise_for_status()
+            download_url = response.json()["url"]
+            log_interaction('get_transcript_url', 'Success', 'URL generated.')
+            return download_url, True
+        except requests.exceptions.RequestException as e:
+            log_interaction('get_transcript_url', 'Failure', f'Request failed.', {"error": str(e)})
+            return None, False
+        except Exception as e:
+            log_interaction('get_transcript_url', 'Failure', f'An unexpected error occurred.', {"error": str(e)})
+            return None, False
+
+
+    def download_transcript(self, transcript_url, conversation_id, communication_id, max_retries, retry_delay, output_directory):
+        """
+        Descarga una transcripción desde una URL y la guarda en un archivo JSON local.
+        Adapta para usar write_json_file_simple. Usa conversationId como filename base.
+        """
+        log_interaction('download_transcript', 'Attempt', f'Downloading transcript for conversation {conversation_id}')
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                response = requests.get(transcript_url)
+                response.raise_for_status() # Lanza excepción para códigos de estado HTTP de error
+
+                # Nombre de archivo usando solo conversationId y extensión .json
+                transcript_filename = f"{conversation_id}.json"
+                output_filepath = os.path.join(output_directory, transcript_filename)
+
+                transcript_data = response.json()
+
+                if write_json_file_simple(transcript_data, output_filepath):
+                    log_interaction('download_transcript', 'Success', f'Transcript saved: {output_filepath}')
+                    return output_filepath # Retornar la ruta si fue exitoso
+                else:
+                     # write_json_file_simple ya logueó el fallo al escribir
+                     retry_count += 1
+                     time.sleep(retry_delay) # Esperar antes de reintentar la descarga si falló el guardado
+            except requests.exceptions.RequestException as e:
+                log_interaction('download_transcript', 'Failure', f'Download request failed. Try {retry_count+1}/{max_retries}.', {"error": str(e)})
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_delay)
+            except Exception as e:
+                log_interaction('download_transcript', 'Failure', f'An unexpected error occurred during download. Try {retry_count+1}/{max_retries}.', {"error": str(e)})
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_delay)
+
+
+        log_interaction('download_transcript', 'Failure', f'Max retries reached. Unable to download transcript for conversation {conversation_id}.')
+        return None # Retornar None si fallaron todos los intentos
+
+# --- Función principal de descarga para usar en el workflow ---
+
+def download_transcriptions_batch(start_date_str: str, end_date_str: str):
+    """
+    Orquesta la descarga de transcripciones de Genesys Cloud para un rango de fechas.
+
+    Args:
+        start_date_str (str): Fecha de inicio del rango (ej. "YYYY-MM-DD").
+        end_date_str (str): Fecha de fin del rango (ej. "YYYY-MM-DD").
+
+    Returns:
+        list: Una lista de rutas de archivos de las transcripciones descargadas exitosamente.
+    """
+    print("\n--- Data Acquisition (Genesys Transcriptions Download) ---")
+    start_time_process = time.time() # Tiempo total del proceso
+
+    # Obtener configuración
+    genesys_config = config_manager.get("genesys_cloud")
+    data_paths = config_manager.get("data_paths")
+    output_directory = data_paths["raw_transcripts"]
+    environment = genesys_config["environment"]
+    step_minutes = genesys_config["download"]["step_minutes"]
+    max_retries = genesys_config["download"]["max_retries"]
+    retry_delay = genesys_config["download"]["retry_delay"]
+    search_query_params_template = genesys_config["download"]["search_query_params"]
+    date_format_config = config_manager.get("pipeline.download_date_format") # Formato de entrada YYYY-MM-DD
+    timezone_config = config_manager.get("pipeline.download_timezone") # Zona horaria
+
+    # Obtener credenciales sensibles de .env
+    client_id = config_manager.get_env("GENESYS_CLOUD_CLIENT_ID")
+    client_secret = config_manager.get_env("GENESYS_CLOUD_CLIENT_SECRET")
+
+    if not all([client_id, client_secret, environment, start_date_str, end_date_str]):
+         log_interaction('download_batch', 'Error', 'Missing essential configuration (Genesys credentials, environment, or date range).')
+         print("Missing configuration for Genesys download. Please check .env and settings.yaml")
+         return [] # Retornar lista vacía si falta config
+
+    # Asegurar que el directorio de salida existe
+    os.makedirs(output_directory, exist_ok=True)
+    log_interaction('download_batch', 'Info', f'Saving transcripts to: {output_directory}')
+
+
+    # Inicializar cliente Genesys
+    client = GenesysCloudClient(client_id, client_secret, environment)
+    access_token = client.authenticate()
+
+    if not access_token:
+        print("Authentication failed. Cannot proceed with download.")
+        return [] # Retornar lista vacía si falla autenticación
+
+    # --- Manejo del rango de fechas e intervalos ---
+    # Convertir fechas de string a datetime con zona horaria
+    try:
+        tz = timezone(timezone_config)
+        # El formato de entrada YYYY-MM-DD debe ser parseado primero
+        start_date_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+        end_date_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+        # Asignar la zona horaria
+        start_date_tz = tz.localize(start_date_dt)
+        end_date_tz = tz.localize(end_date_dt + timedelta(days=1, seconds=-1)) # Fin del día de la fecha fin
+
+    except ValueError as e:
+        log_interaction('download_batch', 'Error', f'Error parsing dates or timezone: {e}. Expected format: YYYY-MM-DD, Timezone: {timezone_config}')
+        print(f"Error parsing dates: {e}. Please check settings.yaml")
+        return []
+
+
+    current_interval_start = start_date_tz
+    downloaded_filepaths = [] # Lista para almacenar las rutas de los archivos descargados
+
+    # Iterar sobre los intervalos de fecha
+    while current_interval_start <= end_date_tz:
+        current_interval_end = current_interval_start + timedelta(minutes=step_minutes)
+        # Asegurarse de no sobrepasar la fecha fin general
+        if current_interval_end > end_date_tz:
+            current_interval_end = end_date_tz
+
+        # Convertir a formato ISO 8601 con zona horaria (Genesys API generalmente espera esto)
+
+
+import os
+import sys
+import time
+import json # Necesario para guardar el JSON descargado
+import base64
+from datetime import timedelta, datetime
+from pytz import timezone # Importar timezone
+
+import requests # Importar requests
+
+# Importar config_manager para obtener configuración
+from src.config import config_manager
+
+# --- Clases y funciones de utilidad (Adaptadas del código antiguo) ---
+
+# Reemplazamos el logging_config y log_interaction con prints simples para la POC
+def log_interaction(step, status, message, details=None):
+    """Simulación básica de logging."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"[{timestamp}] [{step}] [{status}] {message}"
+    if details:
+        log_message += f" Details: {details}"
+    print(log_message) # En una implementación real, usar el módulo logging
+
+# Reemplazamos write_json_file
+def write_json_file_simple(data, filepath):
+    """Guarda un diccionario en un archivo JSON."""
+    try:
+        with open(filepath, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=4, ensure_ascii=False)
+        # log_interaction('write_json_file', 'Success', f'File saved: {filepath}') # Usar si tuvieras log_interaction real
+        return True
+    except Exception as e:
+        log_interaction('write_json_file', 'Failure', f'Failed to save file: {filepath}', {"error": str(e)})
+        return False
+
+# Eliminamos load_json, format_date, setup_logging y utilities ya que config_manager y datetime nativo los reemplazan
+
+class GenesysCloudClient:
+    """
+    Cliente para interactuar con la API de Genesys Cloud (Adaptado).
+
+    Gestiona la autenticación y recuperación de detalles de conversaciones y transcripciones.
+    """
+
+    def __init__(self, client_id, client_secret, environment):
+        self.client_id = client_id
+        self.client_secret = client_secret
+        self.environment = environment
+        self.access_token = None
+        self.auth_url = f"https://login.{self.environment}/oauth/token"
+        self.search_url = f"https://api.{self.environment}/api/v2/speechandtextanalytics/transcripts/search"
+        self.transcript_url_template = f"https://api.{self.environment}/api/v2/speechandtextanalytics/conversations/{{conversation_id}}/communications/{{communication_id}}/transcripturl"
+
+    def authenticate(self):
+        """
+        Autentica al cliente usando credenciales para obtener un token de acceso.
+        """
+        log_interaction('authenticate', 'Attempt', 'Attempting to authenticate with Genesys Cloud.')
+        try:
+            authorization = base64.b64encode(f"{self.client_id}:{self.client_secret}".encode()).decode()
+            headers = {
+                "Authorization": f"Basic {authorization}",
+                "Content-Type": "application/x-www-form-urlencoded"
+            }
+            data = {"grant_type": "client_credentials"}
+            response = requests.post(self.auth_url, data=data, headers=headers)
+            response.raise_for_status()
+            self.access_token = response.json()['access_token']
+            log_interaction('authenticate', 'Success', 'Access token generated.')
+            return self.access_token
+        except Exception as e:
+            log_interaction('authenticate', 'Failure', f'Failed to authenticate.', {"error": str(e)})
+            self.access_token = None # Asegurarse de que el token es None en caso de fallo
+            return None
+
+    def search_transcripts_in_interval(self, search_query_params, start_time_iso, end_time_iso):
+        """
+        Realiza la búsqueda de transcripciones para un intervalo de tiempo específico.
+        Maneja paginación y reintentos básicos a nivel de batch.
+        """
+        if not self.access_token:
+             log_interaction('search_transcripts', 'Failure', 'Authentication failed. No access token.')
+             return []
+
+        all_results = []
+        page_number = 1
+        total_pages = None
+        search_query = search_query_params.copy() # Usar una copia para modificar el rango de fecha y paginación
+
+        # Encontrar y actualizar el filtro DATE_RANGE
+        date_range_filter_found = False
+        for query_filter in search_query.get('query', []):
+            if query_filter.get('type') == 'DATE_RANGE' and 'conversationStartTime' in query_filter.get('fields', []):
+                query_filter['startValue'] = start_time_iso
+                query_filter['endValue'] = end_time_iso
+                # Asegurar que el formato de fecha también está en la query o se especifica aquí si la API lo requiere fijo
+                # query_filter['dateFormat'] = "yyyy-MM-dd'T'HH:mm:ss.SSSSSSX" # Asegurar que esto coincide con la API y start/end_time_iso
+                date_range_filter_found = True
+                break # Solo esperamos un filtro de rango de fechas por conversaciónStartTime
+
+        if not date_range_filter_found:
+             log_interaction('search_transcripts', 'Error', 'DATE_RANGE filter for conversationStartTime not found in search_query_params.')
+             return [] # No se puede buscar sin el filtro de fecha
+
+
+        log_interaction('search_transcripts', 'Attempt', f'Searching for transcripts from {start_time_iso} to {end_time_iso}')
+        # print(f"Search query for interval: {json.dumps(search_query)}") # Debugging print
+
+
+        while total_pages is None or page_number <= total_pages:
+            search_query['pageNumber'] = page_number
+
+            try:
+                response = requests.post(self.search_url, json=search_query, headers={"Authorization": f"Bearer {self.access_token}"})
+                response.raise_for_status()
+                result = response.json()
+                all_results.extend(result.get("results", []))
+
+                if total_pages is None:
+                    total_hits = result.get("total", 0)
+                    total_pages = result.get('pageCount', 1)
+                    log_interaction('search_transcripts', 'Info', f'Total transcripts found in interval: {total_hits}. Total pages: {total_pages}')
+
+                page_number += 1
+
+            except requests.exceptions.RequestException as e:
+                log_interaction('search_transcripts', 'Failure', f'Request failed for page {page_number}.', {"error": str(e)})
+                # Implementar reintento o manejo de error a nivel de página/batch si es necesario
+                # Por ahora, simplemente registramos el error y rompemos el bucle para este intervalo
+                break # Rompe el bucle de paginación para este intervalo si falla una página
+            except Exception as e:
+                 log_interaction('search_transcripts', 'Failure', f'An unexpected error occurred processing page {page_number}.', {"error": str(e)})
+                 break # Rompe el bucle por otros errores
+
+
+        log_interaction('search_transcripts', 'Success', f'Finished searching interval. Found {len(all_results)} results.')
+        return all_results
+
+    def get_transcript_url(self, conversation_id, communication_id):
+        """
+        Obtiene la URL de descarga de la transcripción para una conversación y comunicación.
+        """
+        if not self.access_token:
+             log_interaction('get_transcript_url', 'Failure', 'Authentication failed. No access token.')
+             return None, False
+
+        url = self.transcript_url_template.format(conversation_id=conversation_id, communication_id=communication_id)
+        log_interaction('get_transcript_url', 'Attempt', f'Getting download URL for conversation {conversation_id}, communication {communication_id}')
+        try:
+            response = requests.get(url, headers={"Authorization": f"Bearer {self.access_token}"})
+            response.raise_for_status()
+            download_url = response.json()["url"]
+            log_interaction('get_transcript_url', 'Success', 'URL generated.')
+            return download_url, True
+        except requests.exceptions.RequestException as e:
+            log_interaction('get_transcript_url', 'Failure', f'Request failed.', {"error": str(e)})
+            return None, False
+        except Exception as e:
+            log_interaction('get_transcript_url', 'Failure', f'An unexpected error occurred.', {"error": str(e)})
+            return None, False
+
+
+    def download_transcript(self, transcript_url, conversation_id, communication_id, max_retries, retry_delay, output_directory):
+        """
+        Descarga una transcripción desde una URL y la guarda en un archivo JSON local.
+        Adapta para usar write_json_file_simple. Usa conversationId como filename base.
+        """
+        log_interaction('download_transcript', 'Attempt', f'Downloading transcript for conversation {conversation_id}')
+        retry_count = 0
+        while retry_count < max_retries:
+            try:
+                response = requests.get(transcript_url)
+                response.raise_for_status() # Lanza excepción para códigos de estado HTTP de error
+
+                # Nombre de archivo usando solo conversationId y extensión .json
+                transcript_filename = f"{conversation_id}.json"
+                output_filepath = os.path.join(output_directory, transcript_filename)
+
+                transcript_data = response.json()
+
+                if write_json_file_simple(transcript_data, output_filepath):
+                    log_interaction('download_transcript', 'Success', f'Transcript saved: {output_filepath}')
+                    return output_filepath # Retornar la ruta si fue exitoso
+                else:
+                     # write_json_file_simple ya logueó el fallo al escribir
+                     retry_count += 1
+                     time.sleep(retry_delay) # Esperar antes de reintentar la descarga si falló el guardado
+            except requests.exceptions.RequestException as e:
+                log_interaction('download_transcript', 'Failure', f'Download request failed. Try {retry_count+1}/{max_retries}.', {"error": str(e)})
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_delay)
+            except Exception as e:
+                log_interaction('download_transcript', 'Failure', f'An unexpected error occurred during download. Try {retry_count+1}/{max_retries}.', {"error": str(e)})
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(retry_delay)
+
+
+        log_interaction('download_transcript', 'Failure', f'Max retries reached. Unable to download transcript for conversation {conversation_id}.')
+        return None # Retornar None si fallaron todos los intentos
+
+# --- Función principal de descarga para usar en el workflow ---
+
+def download_transcriptions_batch(start_date_str: str, end_date_str: str):
+    """
+    Orquesta la descarga de transcripciones de Genesys Cloud para un rango de fechas.
+
+    Args:
+        start_date_str (str): Fecha de inicio del rango (ej. "YYYY-MM-DD").
+        end_date_str (str): Fecha de fin del rango (ej. "YYYY-MM-DD").
+
+    Returns:
+        list: Una lista de rutas de archivos de las transcripciones descargadas exitosamente.
+    """
+    print("\n--- Data Acquisition (Genesys Transcriptions Download) ---")
+    start_time_process = time.time() # Tiempo total del proceso
+
+    # Obtener configuración
+    genesys_config = config_manager.get("genesys_cloud")
+    data_paths = config_manager.get("data_paths")
+    output_directory = data_paths["raw_transcripts"]
+    environment = genesys_config["environment"]
+    step_minutes = genesys_config["download"]["step_minutes"]
+    max_retries = genesys_config["download"]["max_retries"]
+    retry_delay = genesys_config["download"]["retry_delay"]
+    search_query_params_template = genesys_config["download"]["search_query_params"]
+    date_format_config = config_manager.get("pipeline.download_date_format") # Formato de entrada YYYY-MM-DD
+    timezone_config = config_manager.get("pipeline.download_timezone") # Zona horaria
+
+    # Obtener credenciales sensibles de .env
+    client_id = config_manager.get_env("GENESYS_CLOUD_CLIENT_ID")
+    client_secret = config_manager.get_env("GENESYS_CLOUD_CLIENT_SECRET")
+
+    if not all([client_id, client_secret, environment, start_date_str, end_date_str]):
+         log_interaction('download_batch', 'Error', 'Missing essential configuration (Genesys credentials, environment, or date range).')
+         print("Missing configuration for Genesys download. Please check .env and settings.yaml")
+         return [] # Retornar lista vacía si falta config
+
+    # Asegurar que el directorio de salida existe
+    os.makedirs(output_directory, exist_ok=True)
+    log_interaction('download_batch', 'Info', f'Saving transcripts to: {output_directory}')
+
+
+    # Inicializar cliente Genesys
+    client = GenesysCloudClient(client_id, client_secret, environment)
+    access_token = client.authenticate()
+
+    if not access_token:
+        print("Authentication failed. Cannot proceed with download.")
+        return [] # Retornar lista vacía si falla autenticación
+
+    # --- Manejo del rango de fechas e intervalos ---
+    # Convertir fechas de string a datetime con zona horaria
+    try:
+        tz = timezone(timezone_config)
+        # El formato de entrada YYYY-MM-DD debe ser parseado primero
+        start_date_dt = datetime.strptime(start_date_str, "%Y-%m-%d")
+        end_date_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+        # Asignar la zona horaria
+        start_date_tz = tz.localize(start_date_dt)
+        end_date_tz = tz.localize(end_date_dt + timedelta(days=1, seconds=-1)) # Fin del día de la fecha fin
+
+    except ValueError as e:
+        log_interaction('download_batch', 'Error', f'Error parsing dates or timezone: {e}. Expected format: YYYY-MM-DD, Timezone: {timezone_config}')
+        print(f"Error parsing dates: {e}. Please check settings.yaml")
+        return []
+
+
+    current_interval_start = start_date_tz
+    downloaded_filepaths = [] # Lista para almacenar las rutas de los archivos descargados
+
+    # Iterar sobre los intervalos de fecha
+    while current_interval_start <= end_date_tz:
+        current_interval_end = current_interval_start + timedelta(minutes=step_minutes)
+        # Asegurarse de no sobrepasar la fecha fin general
+        if current_interval_end > end_date_tz:
+            current_interval_end = end_date_tz
+
+        # Convertir a formato ISO 8601 con zona horaria (Genesys API generalmente espera esto)
+        # El formato exacto puede variar, verificar doc API Genesys.
+        # Ejemplo: 2024-04-25T00:00:00.000+02:00
+        # Algunos sistemas usan Z para UTC. Si la API requiere +HHMM, usar %z.
+        # Si requiere : entre HH y MM, %z no lo da, hay que formatearlo manualmente.
+        # Según el JSON original, el formato de ejemplo es "2024-04-25T00:00:00.000000+02". Vamos a intentar replicarlo.
+        # Ojo: %f da microsegundos, pero el JSON usa 6 dígitos. Zonas horarias con : +02:00 vs +02
+        # Intentemos un formato ISO 8601 común con microsegundos y offset:
+        start_iso = current_interval_start.strftime("%Y-%m-%dT%H:%M:%S.%f") + current_interval_start.strftime("%z")
+        end_iso = current_interval_end.strftime("%Y-%m-%dT%H:%M:%S.%f") + current_interval_end.strftime("%z")
+        # Si la API requiere +HH:MM en el offset, necesitarías:
+        # offset_str = current_interval_start.strftime("%z")
+        # offset_formatted = offset_str[:3] + ":" + offset_str[3:] if len(offset_str) > 3 else offset_str
+        # start_iso = current_interval_start.strftime("%Y-%m-%dT%H:%M:%S.%f") + offset_formatted
+
+
+        log_interaction('download_batch', 'Info', f'Processing interval: {current_interval_start.strftime("%Y-%m-%d %H:%M:%S %Z")} to {current_interval_end.strftime("%Y-%m-%d %H:%M:%S %Z")}')
+
+        # 5. Realizar búsqueda de transcripciones para el intervalo
+        search_results = client.search_transcripts_in_interval(
+            search_query_params_template,
+            start_iso,
+            end_iso
+        )
+
+        if not search_results:
+            print(f"No transcripts found for interval {start_iso} to {end_iso}")
+        else:
+            print(f"Found {len(search_results)} transcripts in this interval batch.")
+            # 6. Descargar cada transcripción encontrada
+            for index, result in enumerate(search_results, start=1):
+                conversation_id = result.get("conversationId")
+                communication_id = result.get("communicationId")
+                # startTime = result.get("startTime") # El startTime del resultado de búsqueda puede ser útil, pero el filename usará conversationId
+
+                if not conversation_id or not communication_id:
+                     log_interaction('download_batch', 'Warning', f'Skipping result {index} due to missing conversationId or communicationId.')
+                     continue
+
+                # Obtener la URL de descarga
+                transcript_url, success_url = client.get_transcript_url(conversation_id, communication_id)
+
+                if success_url and transcript_url:
+                    # Descargar la transcripción y guardar
+                    downloaded_filepath = client.download_transcript(
+                        transcript_url,
+                        conversation_id,
+                        communication_id,
+                        max_retries,
+                        retry_delay,
+                        output_directory
+                    )
+                    if downloaded_filepath:
+                        downloaded_filepaths.append(downloaded_filepath)
+                else:
+                    log_interaction('download_batch', 'Failure', f'Could not get download URL for conversation {conversation_id}.')
+
+        # Avanza al siguiente intervalo de tiempo
+        # Asegurarse de no tener solapamiento usando el fin del intervalo actual como inicio del siguiente
+        # (sumando una pequeña cantidad si es necesario para evitar duplicados, aunque timedelta(minutes) suele ser preciso)
+        current_interval_start = current_interval_end
+
+    end_time_process = time.time()
+    execution_time = end_time_process - start_time_process
+    log_interaction('download_batch', 'Info', f'Total download process finished. Downloaded {len(downloaded_filepaths)} transcripts.')
+    print(f"Total download time: {execution_time:.2f} seconds.")
+
+    return downloaded_filepaths # Retornar la lista de archivos descargados
+
+
+# Nota: La función `download_transcriptions()` del código antiguo que ejecutaba el script
+# si se llamaba directamente (`if __name__ == "__main__":`) no se incluye aquí,
+# ya que la orquestación la hace `main_workflow.py`.
+
+    
+
+actualizar src/main_workflow.py
+desbloqueamos la linea de descarga modificaremos la carga de datos para que procese las transcripciones recién descargadas
+
+
+
+# Este es el script principal que orquesta el pipeline.
+import os
+import glob # Para encontrar archivos de datos por patrón
+
+# Importar módulos del proyecto
+from src.config import config_manager
+# Importar la función de descarga adaptada
+from src.data_acquisition import downloader # Ahora 'downloader' contendrá download_transcriptions_batch
+from src.audio_processing import whisper_processor # Usado solo si use_whisper es True
+from src.data_preparation import data_loader
+from src.evaluation import evaluate_with_llm, apply_post_processing, EVALUATION_STRUCTURE
+from src.results import results_handler
+
+def main():
+    """
+    Función principal que ejecuta el pipeline de evaluación.
+    """
+    print("--- Starting Automated Call Evaluation Pipeline ---")
+
+    # 1. Cargar Configuración
+    config = config_manager # Usar la instancia global
+
+    # Obtener rutas de datos y configuración del pipeline
+    data_paths = config.get("data_paths")
+    pipeline_config = config.get("pipeline")
+    genesys_config = config.get("genesys_cloud") # Obtener config Genesys
+
+    if not data_paths or not pipeline_config or not genesys_config:
+        print("Error: Failed to load essential configuration. Exiting.")
+        return
+
+    # Asegurar directorios existen
+    for path_key in data_paths.values():
+        if isinstance(path_key, str): # Solo crear si es una ruta
+             os.makedirs(path_key, exist_ok=True)
+
+
+    # 2. Adquisición de Datos (Genesys Transcriptions Download)
+    # Desbloquear la llamada a la descarga
+    print("\nStep 2: Data Acquisition (Genesys Transcriptions Download)")
+    download_date_range = pipeline_config.get("download_date_range")
+
+    if download_date_range and download_date_range.get("start_date") and download_date_range.get("end_date"):
+        start_date_str = download_date_range["start_date"]
+        end_date_str = download_date_range["end_date"]
+        downloaded_transcript_filepaths = downloader.download_transcriptions_batch(start_date_str, end_date_str)
+        if downloaded_transcript_filepaths:
+             # Extraer los call_ids de las rutas descargadas (asume nombre_archivo es call_id.json)
+             call_ids_to_process = [os.path.splitext(os.path.basename(p))[0] for p in downloaded_transcript_filepaths]
+             print(f"Successfully downloaded {len(call_ids_to_process)} transcripts. These IDs will be processed.")
+        else:
+             print("No transcripts were downloaded successfully.")
+             call_ids_to_process = [] # No hay IDs para procesar si la descarga falla
+    else:
+        print("Download date range not specified in config/settings.yaml. Skipping download step.")
+        # Si se salta la descarga, necesitamos una forma de identificar las llamadas a procesar.
+        # En este caso, asumiremos que los archivos ya están en el directorio de transcripciones
+        # raw (si use_whisper es false) o whisper (si use_whisper es true).
+        print("Assuming transcripts are already in local data directories.")
+        use_whisper = pipeline_config.get("use_whisper", False)
+        transcripts_source_dir = data_paths["whisper_transcripts"] if use_whisper else data_paths["raw_transcripts"]
+        # Identificar IDs basándose en archivos de transcripción existentes
+        call_ids_to_process = [os.path.splitext(os.path.basename(f))[0] for f in glob.glob(os.path.join(transcripts_source_dir, "*.json"))] # Asume que las transcripciones raw descargadas son .json
+        if not call_ids_to_process:
+             print(f"No transcripts (.json) found in {transcripts_source_dir} to process. Exiting.")
+             return # Salir si no hay archivos que procesar
+
+
+    # --- Aquí iría el Paso 3: Procesamiento de Audio (Whisper) si use_whisper es True ---
+    # Este paso tomaría los audios de data/raw_calls (que aún no se descargan)
+    # y generaría transcripciones en data/whisper_transcripts.
+    # Como solo descargamos transcripciones .json ahora, este paso no aplica a la descarga actual.
+    # Si en el futuro descargas .wav, este paso se activaría.
+    use_whisper = pipeline_config.get("use_whisper", False)
+    if use_whisper:
+         print("\nStep 3: Audio Processing (Whisper) - PLACEHOLDER")
+         print("This step would process downloaded audio files.")
+         # Lógica futura:
+         # raw_calls_dir = data_paths["raw_calls"]
+         # audio_files = glob.glob(os.path.join(raw_calls_dir, "*.wav")) + glob.glob(os.path.join(raw_calls_dir, "*.mp3"))
+         # whisper_processor.process_audio_batch(audio_files)
+         # Despues de esto, data_loader leería de data_paths["whisper_transcripts"]
+         # Pero como ahora solo descargamos JSON, usaremos el directorio de raw_transcripts si no hay whisper files
+         # o si use_whisper es false.
+
+    # Determinar de dónde cargará data_loader las transcripciones
+    transcripts_source_dir = data_paths["whisper_transcripts"] if use_whisper else data_paths["raw_transcripts"]
+    # Si use_whisper es True, pero no hubo archivos de audio o falló el procesamiento,
+    # data_loader debería tener una lógica de fallback o main_workflow decidir.
+    # Por simplicidad, data_loader intentará cargar de donde le digamos, y si falla, reportará.
+    print(f"\nStep 4: Data Loading for Evaluation (Loading from {transcripts_source_dir} for transcripts)")
+
+
+    all_evaluation_results_flat = [] # Lista plana para todos los resultados de todos los ítems/llamadas
+
+    if not call_ids_to_process:
+        print("No call IDs to process after download or identification. Exiting.")
+        return
+
+    print(f"Identified {len(call_ids_to_process)} calls to process.")
+    for call_id in call_ids_to_process:
+        # Cargar datos para la llamada actual
+        # Pasar use_whisper flag para que data_loader sepa de dónde cargar la transcripción (json raw vs txt whisper)
+        call_data = data_loader.load_call_data_for_evaluation(call_id, use_whisper=use_whisper)
+
+        if not call_data or not call_data.get("transcript"):
+            print(f"Skipping evaluation for call {call_id} due to data loading error or missing transcript.")
+            # Opcional: Añadir resultados de "N/A" o "Error" para esta llamada y todos sus ítems esperados
+            all_item_ids = [id for group in EVALUATION_STRUCTURE.values() for id in group['item_ids']]
+            error_results = [{"call_id": call_id, "item_id": item_id, "result": "Error", "reason": "Failed to load transcript or data.", "transcript_segment": ""} for item_id in all_item_ids]
+            all_evaluation_results_flat.extend(error_results)
+            continue
+
+        # 5. Evaluación con LLM
+        print(f"\nStep 5: Evaluation for call {call_id}")
+        initial_results_for_call = []
+        # Obtener las claves de evaluación a ejecutar desde la configuración
+        eval_structure_keys = pipeline_config.get("items_to_evaluate")
+        if not eval_structure_keys:
+            eval_structure_keys = EVALUATION_STRUCTURE.keys() # Evaluar todos si no se especifica en config
+            print("No specific items_to_evaluate defined in config. Evaluating all defined groups/items.")
+        else:
+             print(f"Evaluating specified items/groups: {eval_structure_keys}")
+
+
+        for evaluation_key in eval_structure_keys:
+             if evaluation_key not in EVALUATION_STRUCTURE:
+                  print(f"Warning: Evaluation key '{evaluation_key}' from config not found in EVALUATION_STRUCTURE. Skipping for call {call_id}.")
+                  continue
+
+             item_ids_in_group = EVALUATION_STRUCTURE[evaluation_key]["item_ids"]
+             print(f"  Evaluating group/item: {evaluation_key} ({item_ids_in_group}) for call {call_id}")
+
+             # Llamada a la función de evaluación con LLM
+             group_results = evaluate_with_llm(evaluation_key, call_data['transcript'], call_data['call_metadata'])
+             initial_results_for_call.extend(group_results) # Añadir todos los resultados (puede ser 1 o varios)
+
+
+        # Añadir call_id a cada resultado para facilitar el seguimiento en la lista plana
+        for res in initial_results_for_call:
+             res['call_id'] = call_id
+
+        # 6. Post-Procesamiento
+        print(f"\nStep 6: Post-Processing for call {call_id}")
+        final_results_for_call = apply_post_processing(initial_results_for_call, call_data['call_metadata'])
+        all_evaluation_results_flat.extend(final_results_for_call) # Añadir los resultados finales de la llamada a la lista plana global
+
+
+    # 7. Guardar Resultados
+    print("\nStep 7: Saving Results")
+    if all_evaluation_results_flat:
+        # Asegurarse de que cada resultado tenga el call_id antes de guardar
+        # (Ya lo añadimos en el paso 5, pero doble check si apply_post_processing lo modificara)
+        for res in all_evaluation_results_flat:
+            if 'call_id' not in res:
+                 # Intentar obtenerlo de metadatos si falta y es posible
+                 # Esto es un fallback, idealmente se añade al crear el resultado inicial
+                 res['call_id'] = res.get('item_id', 'Unknown').split('_')[0] # Ejemplo tonto, mejor asegurar en paso 5
+                 if res['call_id'] == 'Unknown':
+                      print(f"Warning: Result for item {res.get('item_id')} has no call_id. Using 'Unknown'.")
+
+
+        # Guardar en JSON
+        results_handler.save_evaluation_results_to_json(all_evaluation_results_flat, "evaluation_output.json")
+        # Guardar en CSV (si necesitas)
+        # results_handler.save_evaluation_results_to_csv(all_evaluation_results_flat, "evaluation_output.csv")
+    else:
+        print("No evaluation results generated to save.")
+
+
+    print("\n--- Automated Call Evaluation Pipeline Finished ---")
+
+
+# Punto de entrada del script
+if __name__ == "__main__":
+    # Esto permite ejecutar el main_workflow directamente
+    main()
+
+6. Actualizar src/data_preparation/data_loader.py
+Aseguramos que puede cargar archivos .json desde el directorio de transcripciones raw (ya que Genesys los descarga en JSON) y que usa el use_whisper flag correctamente para elegir el directorio de origen.
+
+
+import os
+import json
+# Importar config_manager para obtener rutas de datos
+from src.config import config_manager
+from datetime import datetime, timedelta # Para lógica de fecha (ej. Ítem 5)
+
+def load_call_data_for_evaluation(call_id: str, use_whisper: bool = True):
+    """
+    Carga y prepara todos los datos necesarios para la evaluación de una sola llamada.
+
+    Args:
+        call_id (str): El ID único de la llamada.
+        use_whisper (bool): Si usar la transcripción de Whisper (True) o la raw (False).
+                           Nota: Las transcripciones raw descargadas son JSON de Genesys.
+
+    Returns:
+        dict: Diccionario `call_data` con 'transcript' (texto plano) y 'call_metadata',
+              o None si los archivos necesarios no se encuentran.
+    """
+    print(f"\n--- Data Preparation (Loading) for call {call_id} ---")
+
+    data_paths = config_manager.get("data_paths")
+
+    # Determinar el directorio de origen de la transcripción
+    # Si use_whisper es True, esperamos un .txt de Whisper
+    # Si use_whisper es False, esperamos un .json raw descargado de Genesys
+    transcript_dir = data_paths["whisper_transcripts"] if use_whisper else data_paths["raw_transcripts"]
+    transcript_extension = ".txt" if use_whisper else ".json"
+
+    k_plus_dir = data_paths["k_plus_data"]
+
+    # Cargar Transcripción
+    transcript_filepath = os.path.join(transcript_dir, f"{call_id}{transcript_extension}")
+    transcript_content = None
+    raw_transcript_json = None # Guardar el JSON si cargamos el raw
+
+    try:
+        with open(transcript_filepath, 'r', encoding='utf-8') as f:
+            if use_whisper:
+                transcript_content = f.read() # Whisper es texto plano
+            else:
+                 # La transcripción raw de Genesys es un JSON
+                 raw_transcript_json = json.load(f)
+                 # Extraer el texto plano del JSON de Genesys
+                 # Esto depende de la estructura exacta del JSON de Genesys.
+                 # Ejemplo: si es una lista de turnos con clave 'text':
+                 # transcript_content = " ".join([turn['text'] for turn in raw_transcript_json.get('elements', []) if 'text' in turn])
+                 # O una estructura más compleja... Adaptar según el JSON real.
+                 # Para la POC, asumiremos una estructura simple o adaptamos la lógica.
+                 # Si el JSON tiene una clave principal con todo el texto, úsala.
+                 # Si es complejo, necesitas parsearlo para extraer solo el texto hablado.
+                 # Por ahora, asumiremos que el JSON tiene una estructura donde se puede extraer el texto.
+                 # *** ADAPTAR A LA ESTRUCTURA REAL DE TU JSON DE TRANSCRIPCIÓN DE GENESYS ***
+                 try:
+                      # Ejemplo: Asumir que el JSON tiene una lista de 'elements'
+                      # y cada elemento tiene un 'text'.
+                      # Si la estructura es diferente, ajusta esto.
+                      if isinstance(raw_transcript_json, dict) and 'elements' in raw_transcript_json:
+                           transcript_content = " ".join([elem.get('text', '') for elem in raw_transcript_json['elements'] if isinstance(elem, dict)])
+                      elif isinstance(raw_transcript_json, str):
+                           # A veces la API devuelve un string JSON que necesita otro loads
+                           try:
+                                re_parsed = json.loads(raw_transcript_json)
+                                if isinstance(re_parsed, dict) and 'elements' in re_parsed:
+                                    transcript_content = " ".join([elem.get('text', '') for elem in re_parsed['elements'] if isinstance(elem, dict)])
+                                else:
+                                     print(f"Warning: Raw transcript JSON for {call_id} loaded but unexpected structure.")
+                                     transcript_content = json.dumps(raw_transcript_json, ensure_ascii=False) # Usar el JSON como texto si no se puede extraer
+                           except json.JSONDecodeError:
+                                print(f"Warning: Raw transcript JSON for {call_id} is not valid JSON.")
+                                transcript_content = raw_transcript_json # Usar el texto tal cual si no es JSON válido
+                      else:
+                           print(f"Warning: Raw transcript JSON for {call_id} loaded but unexpected root type.")
+                           transcript_content = json.dumps(raw_transcript_json, ensure_ascii=False) # Usar el JSON como texto si no se puede extraer
+
+                 except Exception as json_parse_error:
+                      print(f"Error parsing raw transcript JSON for {call_id}: {json_parse_error}. Using raw text as content.")
+                      transcript_content = f.read() # Fallback a leer como texto plano si falla el JSON
+                      # Debes inspeccionar el JSON de Genesys para hacer esto correctamente
+
+
+        if not transcript_content:
+             print(f"Error: Transcript content extracted is empty for call {call_id} from {transcript_filepath}")
+             return None # No se puede evaluar con transcripción vacía
+
+        print(f"Loaded transcript from: {transcript_filepath}")
+    except FileNotFoundError:
+        print(f"Error: Transcript file not found for call {call_id} at {transcript_filepath}")
+        return None # No se puede evaluar sin transcripción
+
+    # Cargar Metadatos y Datos de K+
+    # Asumimos que los datos de K+ están siempre en un archivo JSON con el mismo call_id
+    metadata_filepath = os.path.join(k_plus_dir, f"{call_id}.json")
+    call_metadata = {}
+    try:
+        with open(metadata_filepath, 'r', encoding='utf-8') as f:
+            call_metadata = json.load(f)
+        print(f"Loaded metadata and K+ data from: {metadata_filepath}")
+
+        # --- Lógica de preparación adicional (ej. calcular si flag prescripción es reciente) ---
+        # Esto lo hacemos aquí al cargar los metadatos.
+        today = datetime.now() # Usar fecha actual para esta lógica
+        flag_date_str = call_metadata.get("k_plus_data_snapshot", {}).get("fecha_flag_argumentario_prescripcion")
+        is_flag_recent = False
+        if flag_date_str and flag_date_str != "N/A": # Permitir "N/A" o None como indicador de no flag
+            try:
+                # Asumir formato YYYY-MM-DD para la fecha en K+ snapshot
+                flag_date = datetime.strptime(flag_date_str, "%Y-%m-%d")
+                if today - flag_date < timedelta(days=90): # Aproximadamente 3 meses
+                    is_flag_recent = True
+            except (ValueError, TypeError):
+                print(f"Warning: Could not parse prescription_flag_date {flag_date_str} for call {call_id} in K+ data.")
+        call_metadata["is_prescription_flag_recent"] = is_flag_recent # Añadir este dato calculado al metadata
+
+
+        # Añadir el call_id al metadata si no está ya presente
+        if 'call_id' not in call_metadata:
+             call_metadata['call_id'] = call_id
+
+        # Añadir la ruta de la transcripción cargada y si se usó Whisper para referencia
+        call_metadata['transcript_filepath'] = transcript_filepath
+        call_metadata['used_whisper_transcript'] = use_whisper
+        if raw_transcript_json:
+             call_metadata['raw_transcript_json_loaded'] = raw_transcript_json # Opcional: guardar el JSON crudo si se cargó
+
+
+    except FileNotFoundError:
+        print(f"Warning: K+ data file not found for call {call_id} at {metadata_filepath}. Proceeding with limited metadata.")
+        # Continuar con metadatos mínimos si el archivo K+ no existe
+        # Asegurar que k_plus_data_snapshot está vacío para evitar errores en los prompts
+        call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}, "is_prescription_flag_recent": False, 'transcript_filepath': transcript_filepath, 'used_whisper_transcript': use_whisper}
+    except json.JSONDecodeError:
+         print(f"Error decoding JSON from K+ data file {metadata_filepath} for call {call_id}. Proceeding with empty metadata.")
+         call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}, "is_prescription_flag_recent": False, 'transcript_filepath': transcript_filepath, 'used_whisper_transcript': use_whisper}
+    except Exception as e:
+         print(f"An unexpected error occurred loading K+ data for call {call_id}: {e}. Proceeding with empty metadata.")
+         call_metadata = {"call_id": call_id, "call_type": "Desconocido", "duration": 0, "k_plus_incident": False, "k_plus_data_snapshot": {}, "is_prescription_flag_recent": False, 'transcript_filepath': transcript_filepath, 'used_whisper_transcript': use_whisper}
+
+
+    # Ensamblar el diccionario final para evaluación
+    call_data = {
+        "transcript": transcript_content,
+        "call_metadata": call_metadata
+    }
+
+    print(f"Data loaded successfully for call {call_id}.")
+    return call_data
+
+Pasos Finales:
+ * Asegúrate de que tu entorno virtual esté activado (source .venv/bin/activate).
+ * Instala las nuevas dependencias: pip install -r requirements.txt.
+ * Rellena tu .env con las credenciales de Genesys.
+ * Rellena config/settings.yaml con la configuración de Genesys, incluyendo el rango de fechas que quieres descargar (pipeline.download_date_range).
+ * Muy Importante: Edita src/evaluation/item_rules.py y adapta la sección rules_detail para cada ítem en el diccionario ITEM_RULES. Las reglas deben indicar al LLM cuándo usar los campos específicos dentro del diccionario k_plus_data_snapshot que se le pasa en el prompt. Por ejemplo, para Ítem 4, en la regla de "DOB no en sistema", cambia la redacción para referenciar k_plus_data_snapshot.fecha_nacimiento. Para Ítem 6, para "datos de contacto 'VALIDO'", indica que debe comparar con las listas k_plus_data_snapshot.telefonos_validos, etc. Para Ítem 20, especifica que debe mirar los campos estado_registro_... en k_plus_data_snapshot para verificar el resultado del registro.
+ * Ejecuta el pipeline: python scripts/run_pipeline.py.
+Ahora, al ejecutar el pipeline, el Paso 2 intentará conectarse a Genesys Cloud, descargar las transcripciones (en formato JSON por defecto desde esa API), guardarlas en data/raw_transcripts/ y luego el data_loader leerá esas transcripciones JSON (extraerá el texto) y los datos de K+ asociados (que debes tener en archivos JSON separados en data/k_plus_data/) para pasarlos al evaluador LLM.
+Recuerda que la parte de descarga de audio no está implementada en este código adaptado, solo la descarga de transcripciones JSON. Si necesitas el audio para Whisper, ese módulo (whisper_processor.py) y la lógica de descarga de audio en downloader.py (o un nuevo módulo) son tareas futuras.
+
+
