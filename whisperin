@@ -1,0 +1,866 @@
+Okay, vamos a integrar la lógica de extracción y estructuración de la información del JSON de transcripción de Genesys, añadir el manejo del archivo wrapup_codes.json, actualizar el filtro para que devuelva la info necesaria, y refinar el data_loader y main_workflow para gestionar este nuevo flujo.
+1. Crear el archivo config/wrapup_codes.json
+Este archivo contendrá el mapeo de los códigos de wrap-up a su información estructurada.
+{
+    "62c6d1ab-8b6e-448d-b71b-6febf9a76aea": {
+        "Codigos de Conclusion": "PA (Payment Agreement)",
+        "Descripcion": "Varias opciones: Formalizado acuerdo de pago , Fijada nueva fecha de pago , Pago ya realizado",
+        "Aplicacion": "Identificar escenarios como PA (Payment Agreement) nuevo tras cambio de condiciones, PA roto o anulado, PA vigente, PA vigente con nueva fecha de vencimiento",
+        "Indicaciones Adicionales": "Identificar el acuerdo final de pago. El número total de expedientes. El número de expedientes sobre los que se ha alcanzado el acuerdo de pago y la cuantía."
+    },
+    "63d7f77e-6d33-41e6-9b4c-9b5c786bb326": {
+        "Codigos de Conclusion": "CD sin PTP (Promess To Pay)",
+        "Descripcion": "Contacto directo sin acuerdo de pago",
+        "Aplicacion": "Identificar uno de los escenarios siguientes u otro no mencionado: - Con predisposicion a cerrar acuerdo de pago/negociar. - Negativas claras al pago. - Falta de pago por otros motivos. - No paga debido a Mala Situación Personal.",
+        "Indicaciones Adicionales": "Identificar motivos por los que no se cierra el acuerdo de pago y posibles detalles sobre situacion economica del cliente"
+    },
+    "68fd4fee-008b-433d-b049-c5ab2b8c97f2": {
+        "Codigos de Conclusion": "CI",
+        "Descripcion": "Contacto indirecto",
+        "Aplicacion": "tercero que anota recado o facilita informacion, o conoce a interviniente, pero no da recado si no informamos.",
+        "Indicaciones Adicionales": "Identificar si el recado se deja satisfactoriamente y si hay reprogramación."
+    },
+    "9c17002f-6f4c-4678-a732-c49d377a3147": {
+        "Codigos de Conclusion": "CI sin Recado",
+        "Descripcion": "Contacto indirecto sin dejar recado",
+        "Aplicacion": "Se identifica a un tercero pero no se informa del motivo o no se deja recado por indicaciones recibidas.",
+        "Indicaciones Adicionales": "Identificar si no se informa o no se deja recado por orden recibida, o por algun otro motivo."
+    },
+    "aec7aca9-3a1f-4a13-a74e-2bd238d743d4": {
+        "Codigos de Conclusion": "Inlocalizado",
+        "Descripcion": "Teléfono erróneo o descolgado sin identificar",
+        "Aplicacion": "Identificar si la llamada se ha realizado y no se ha podido contactar con el cliente. Validar si el telefono es erróneo y si hay que dar de baja el telefono.",
+        "Indicaciones Adicionales": "Identificar si el telefono es erróneo y se debe dar de baja."
+    },
+    "e872ba9a-ff04-487e-9e2a-b65422e6f81f": {
+        "Codigos de Conclusion": "Ausente",
+        "Descripcion": "Cliente ausente (no descuelga)",
+        "Aplicacion": "Identificar si el cliente no ha descolgado la llamada. Validar si el telefono es correcto y se debe mantener activo.",
+        "Indicaciones Adicionales": "Identificar si el telefono es correcto y se debe mantener activo."
+    },
+    "0cce61a7-9fe9-4dfd-b9a2-b363c70cdd8e": {
+        "Codigos de Conclusion": "Gestión en Llamada Entrante",
+        "Descripcion": "Gestión realizada en llamada entrante por el cliente",
+        "Aplicacion": "Identificar si la llamada entrante ha sido gestionada correctamente. Validar si se ha resuelto la consulta o se ha derivado al area correspondiente.",
+        "Indicaciones Adicionales": "Identificar si la gestión ha sido completa y si el cliente queda satisfecho."
+    },
+    "a3ee5ded-17f6-426a-9bf0-5a757fbcb8a1": {
+        "Codigos de Conclusion": "Cierre de llamada",
+        "Descripcion": "Llamada cerrada por agente",
+        "Aplicacion": "Identificar si el agente cierra la llamada correctamente, agradeciendo la atencion y despidiendose.",
+        "Indicaciones Adicionales": "Identificar si el cierre es adecuado y si el cliente queda con buena impresion."
+    },
+    "ace1877e-fe59-4a5e-bada-ec084ffe2469": {
+        "Codigos de Conclusion": "Error en Llamada",
+        "Descripcion": "Llamada con error técnico",
+        "Aplicacion": "Identificar si ha habido algun problema tecnico durante la llamada (caida, mala calidad, etc.).",
+        "Indicaciones Adicionales": "Identificar el tipo de error tecnico y si se ha podido solucionar."
+    },
+     "f857ef29-9448-439c-9829-b0e0d155632f": {
+        "Codigos de Conclusion": "Consulta Interna",
+        "Descripcion": "Llamada a otro departamento o agente",
+        "Aplicacion": "Identificar si la llamada es interna y se realiza para consultar dudas o derivar casos.",
+        "Indicaciones Adicionales": "Identificar el motivo de la consulta interna."
+    },
+    "ININ-WRAP-UP-TIMEOUT": {
+        "Codigos de Conclusion": "TIMEOUT",
+        "Descripcion": "No se seleccionó wrap-up code",
+        "Aplicacion": "Identificar si el agente no seleccionó un wrap-up code.",
+        "Indicaciones Adicionales": "Indica falta de gestion del wrap-up code."
+    }
+    # ... añadir el resto de 30 wrap-up codes aquí
+}
+
+2. Actualizar src/config/config_manager.py
+Aseguramos que el ConfigManager pueda cargar también el archivo wrapup_codes.json.
+import os
+import yaml
+import json # Importar para cargar JSON
+from dotenv import load_dotenv
+
+class ConfigManager:
+    """
+    Gestiona la carga de configuración desde variables de entorno y archivo YAML.
+    También carga datos de referencia como wrapup_codes.
+    """
+    _instance = None
+    _config = {}
+    _ref_data = {} # Nuevo diccionario para datos de referencia
+
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(ConfigManager, cls).__new__(cls)
+            cls._instance._load_config()
+            cls._instance._load_ref_data() # Cargar datos de referencia
+        return cls._instance
+
+    def _load_config(self):
+        """Carga la configuración desde .env y settings.yaml."""
+        load_dotenv()
+        print("Environment variables loaded from .env")
+
+        config_path = os.path.join(os.path.dirname(__file__), '../../config/settings.yaml')
+        try:
+            with open(config_path, 'r', encoding='utf-8') as f:
+                self._config = yaml.safe_load(f)
+            print(f"Configuration loaded from {config_path}")
+        except FileNotFoundError:
+            print(f"Warning: Configuration file not found at {config_path}. Using defaults or environment variables only.")
+            self._config = {}
+        except yaml.YAMLError as e:
+            print(f"Error loading YAML configuration from {config_path}: {e}")
+            self._config = {}
+
+    def _load_ref_data(self):
+        """Carga datos de referencia desde archivos (ej. wrapup_codes.json)."""
+        ref_data_dir = os.path.join(os.path.dirname(__file__), '../../config/') # Asumimos en config/ por ahora
+        wrapup_codes_path = os.path.join(ref_data_dir, 'wrapup_codes.json')
+
+        try:
+            with open(wrapup_codes_path, 'r', encoding='utf-8') as f:
+                self._ref_data['wrapup_codes'] = json.load(f)
+            print(f"Reference data loaded from {wrapup_codes_path}")
+        except FileNotFoundError:
+            print(f"Warning: Wrapup codes file not found at {wrapup_codes_path}. Wrap-up info will be unavailable.")
+            self._ref_data['wrapup_codes'] = {}
+        except json.JSONDecodeError as e:
+            print(f"Error decoding JSON from wrapup codes file {wrapup_codes_path}: {e}. Wrap-up info will be unavailable.")
+            self._ref_data['wrapup_codes'] = {}
+        except Exception as e:
+            print(f"Error loading wrapup codes file {wrapup_codes_path}: {e}. Wrap-up info will be unavailable.")
+            self._ref_data['wrapup_codes'] = {}
+
+
+    def get(self, key: str, default=None):
+        """Obtiene un valor de configuración por clave (permite acceder a diccionarios anidados con '.')."""
+        keys = key.split('.')
+        value = self._config
+        try:
+            for k in keys:
+                value = value[k]
+            return value
+        except (KeyError, TypeError):
+            return default
+
+    def get_env(self, key: str, default=None):
+        """Obtiene un valor directamente desde las variables de entorno."""
+        return os.getenv(key, default)
+
+    def get_ref_data(self, key: str, default=None):
+        """Obtiene datos de referencia por clave (ej. 'wrapup_codes')."""
+        return self._ref_data.get(key, default)
+
+
+# Instancia Singleton para fácil acceso
+config_manager = ConfigManager()
+
+# Ejemplo de cómo otros módulos accederían:
+# from src.config import config_manager
+# openai_key = config_manager.get_env("AZURE_OPENAI_KEY")
+# wrapup_mapping = config_manager.get_ref_data("wrapup_codes")
+
+3. Actualizar src/data_preparation/__init__.py
+No hay cambios funcionales, solo para asegurar que el módulo es un paquete.
+# Este archivo marca el directorio src/data_preparation como un paquete Python.
+from .data_loader import load_call_data_for_evaluation
+from .transcript_filter import filter_transcriptions
+
+4. Actualizar src/data_preparation/transcript_filter.py
+Modificamos la función de filtro para que, si el filtro por wrap-up code está habilitado y un archivo pasa el filtro, devuelva un diccionario con conversationId, communicationId, y la ruta al archivo. Si el filtro está deshabilitado, simplemente devuelve un diccionario con los IDs y la ruta para cada archivo JSON encontrado.
+import os
+import json
+# Importar config_manager para obtener configuración y rutas
+from src.config import config_manager
+from datetime import datetime # Necesario para el log dummy
+
+def log_filter_interaction(step, status, message, details=None):
+    """Simulación básica de logging para el filtro."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"[{timestamp}] [Filtering - {step}] [{status}] {message}"
+    if details:
+        log_message += f" Details: {details}"
+    print(log_message)
+
+
+def filter_transcriptions(transcript_filepaths: list):
+    """
+    Filtra archivos de transcripción JSON basados en su wrapUpCode (si filtro habilitado).
+    Elimina los archivos que no cumplen el criterio si el filtro está habilitado.
+    Extrae conversationId y communicationId para los archivos que pasan o si el filtro está deshabilitado.
+
+    Args:
+        transcript_filepaths (list): Lista de rutas de archivos de transcripción JSON raw descargados.
+
+    Returns:
+        list: Una lista de diccionarios, donde cada diccionario contiene
+              {'conversationId': str, 'communicationId': str, 'filepath': str}
+              para los archivos que pasaron el filtro o fueron incluidos si el filtro está deshabilitado.
+    """
+    print("\n--- Data Preparation (Transcript Filtering) ---")
+    filter_config = config_manager.get("genesys_cloud.filter", {})
+    filter_enabled = filter_config.get("enabled", False)
+
+    if not filter_enabled:
+        print("Transcript filtering is disabled in settings.yaml. Processing all found files.")
+        # Si el filtro está deshabilitado, simplemente cargamos cada archivo para obtener los IDs
+        # y los devolvemos como si hubieran "pasado" el filtro.
+        processed_files_info = []
+        for filepath in transcript_filepaths:
+             filename = os.path.basename(filepath)
+             conversation_id = os.path.splitext(filename)[0] # Asume filename es conversationId.json
+
+             try:
+                  with open(filepath, 'r', encoding='utf-8') as f:
+                       transcript_data_partial = json.load(f) # Cargar solo para obtener IDs
+                       comm_id = transcript_data_partial.get("communicationId", conversation_id) # communicationId o usar conversationId si falta
+
+                  processed_files_info.append({
+                       'conversationId': conversation_id,
+                       'communicationId': comm_id,
+                       'filepath': filepath
+                  })
+                  log_filter_interaction('filter_file', 'Info', f"Filter disabled. Including file {filename}", {"conversationId": conversation_id, "communicationId": comm_id})
+
+             except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
+                  log_filter_interaction('filter_file', 'Error', f"Error reading file {filepath} while filter is disabled: {e}. Skipping.", {"conversationId": conversation_id})
+                  # No eliminamos el archivo si el filtro está deshabilitado, solo lo saltamos si no se puede leer.
+
+        print(f"Filter disabled. {len(processed_files_info)} files included.")
+        return processed_files_info # Devolvemos la lista de archivos encontrados con IDs si filtro deshabilitado
+
+
+    # --- Lógica de Filtrado (si está habilitado) ---
+    accepted_codes = set(filter_config.get("accepted_wrap_up_codes", []))
+
+    if not accepted_codes:
+        log_filter_interaction('filter_batch', 'Warning', 'Filter enabled but no accepted wrap_up_codes defined in settings.yaml.')
+        print("No accepted wrap_up_codes defined in config. Filtering enabled but no codes to check against.")
+        return [] # Si el filtro está habilitado pero sin códigos, no pasa nada.
+
+
+    print(f"Filtering {len(transcript_filepaths)} transcripts based on wrap-up codes.")
+    print(f"Accepted wrap-up codes: {list(accepted_codes)}") # Mostrar lista para claridad
+
+    passed_filter_info = [] # Lista de diccionarios {IDs, filepath} para los que pasaron
+    conteo_codigos_aceptados = {codigo: 0 for codigo in accepted_codes}
+    conteo_filtrados = 0
+    conteo_error = 0 # Errores de lectura o parsing
+
+    for filepath in transcript_filepaths:
+        filename = os.path.basename(filepath)
+        conversation_id = os.path.splitext(filename)[0] # Asume que el filename es conversationId.json
+        communication_id = conversation_id # Valor por defecto si communicationId no se encuentra fácilmente
+
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                transcript_data = json.load(f)
+
+            # Extraer communicationId del JSON si está disponible
+            communication_id = transcript_data.get("communicationId", conversation_id)
+
+
+            wrap_up_code = None
+            # Buscar wrapUpCode en el participante con participantPurpose "agent"
+            participants = transcript_data.get("participants", [])
+            for participant in participants:
+                if participant.get("participantPurpose") == "agent":
+                    wrap_up_code = participant.get("wrapUpCode")
+                    # El campo wrapUpCode puede ser null si no se asignó
+                    break
+
+            if wrap_up_code is None:
+                log_filter_interaction('filter_file', 'Info', f"Filtering file {filename}: No 'wrapUpCode' found for an 'agent' participant.", {"conversation_id": conversation_id})
+                os.remove(filepath) # Eliminar archivo no deseado
+                conteo_filtrados += 1
+            elif wrap_up_code in accepted_codes:
+                log_filter_interaction('filter_file', 'Success', f"File {filename} PASSED filter. Wrap-up code: {wrap_up_code}", {"conversation_id": conversation_id, "communication_id": communication_id})
+                passed_filter_info.append({ # Añadir a la lista de los que pasaron
+                     'conversationId': conversation_id,
+                     'communicationId': communication_id,
+                     'filepath': filepath
+                })
+                conteo_codigos_aceptados[wrap_up_code] += 1
+            else:
+                log_filter_interaction('filter_file', 'Info', f"Filtering file {filename}: Wrap-up code '{wrap_up_code}' NOT in accepted list.", {"conversation_id": conversation_id, "communication_id": communication_id})
+                os.remove(filepath) # Eliminar archivo no deseado
+                conteo_filtrados += 1
+
+        except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
+            log_filter_interaction('filter_file', 'Error', f"Error processing file {filepath} during filtering: {e}. Deleting.", {"conversation_id": conversation_id, "communication_id": communication_id, "error": str(e)})
+            try:
+                 if os.path.exists(filepath): # Solo intentar borrar si existía
+                    os.remove(filepath) # Eliminar archivo con error
+            except OSError:
+                 pass # Ignorar si falla la eliminación
+            conteo_error += 1
+            conteo_filtrados += 1 # Considerar como filtrado si no se pudo procesar
+
+    print("\n--- Transcript Filtering Summary ---")
+    print(f"Total files processed (initial): {len(transcript_filepaths)}")
+    print(f"Files passed filter: {len(passed_filter_info)}")
+    print(f"Files filtered (wrap-up not accepted/missing or error): {conteo_filtrados}")
+    print(f"Files skipped due to read/parse error during filter: {conteo_error}") # Contar errores por separado si se eliminan
+    print("Counts for accepted wrap-up codes (among those that passed):")
+    for codigo, conteo in conteo_codigos_aceptados.items():
+        print(f"  - '{codigo}': {conteo}")
+    print("------------------------------------")
+
+
+    return passed_filter_info
+
+5. Actualizar src/data_preparation/data_loader.py (para extraer toda la info y usar wrapup_codes.json)
+Modificamos la función load_call_data_for_evaluation para:
+ * Leer el JSON de transcripción raw (si no use_whisper) o solo usarlo para metadata (si use_whisper).
+ * Extraer conversationId, communicationId, call_type (de initialDirection del primer participante), y wrapUpCode del agente.
+ * Usar config_manager para obtener el mapeo de wrapup_codes.json y añadir la info detallada del wrap-up a call_metadata.
+ * Extraer el texto plano formateado (Agente: ..., Interlocutor: ...) del JSON raw.
+ * Si use_whisper es True, intentar cargar el archivo de Whisper (.txt) y usar ese texto en lugar del texto formateado del JSON raw, pero manteniendo la metadata extraída del JSON raw.
+ * Mantener la lógica de carga y generación dummy de datos de K+.
+import os
+import json
+from datetime import datetime, timedelta
+from pytz import timezone
+
+from src.config import config_manager
+
+def log_data_loading_interaction(step, status, message, details=None):
+    """Simulación básica de logging para carga de datos."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_message = f"[{timestamp}] [Data Loading - {step}] [{status}] {message}"
+    if details:
+        log_message += f" Details: {details}"
+    print(log_message)
+
+def extract_formatted_transcript_text(transcript_json_data):
+    """
+    Extrae y formatea el texto de la transcripción de un JSON raw de Genesys,
+    intercalando los hablantes. Adapta la lógica de tu función leer_transcripcion.
+    """
+    frases_formateadas = []
+    hablante_anterior = None
+
+    transcripts_array = transcript_json_data.get("transcripts", [])
+    for transcript_entry in transcripts_array:
+        # Solo considerar entradas de transcripción de voz
+        if 'VOICE_TRANSCRIPTION' in transcript_entry.get('features', []):
+            phrases = transcript_entry.get('phrases', [])
+            for phrase in phrases:
+                texto = phrase.get("text", "").strip()
+                purpose = phrase.get("participantPurpose", "")
+
+                if purpose == "internal":
+                    hablante = "Agente"
+                elif purpose == "external":
+                    hablante = "Interlocutor"
+                else:
+                    hablante = "Desconocido"
+
+                if not texto:
+                    continue # Ignorar frases vacías
+
+                # Intercalar hablantes
+                if frases_formateadas and hablante == hablante_anterior:
+                    # Añadimos al último bloque del mismo hablante
+                    frases_formateadas[-1] += f" {texto}"
+                else:
+                    # Nuevo hablante o primer frase
+                    frases_formateadas.append(f"{hablante}: {texto}")
+                    hablante_anterior = hablante
+
+    return "\n".join(frases_formateadas) # Unir con saltos de línea para claridad
+
+def load_call_data_for_evaluation(call_id: str, raw_transcript_filepath: str, use_whisper: bool = True):
+    """
+    Carga y prepara todos los datos necesarios para la evaluación de una sola llamada.
+
+    Args:
+        call_id (str): El ID único de la llamada (conversationId).
+        raw_transcript_filepath (str): Ruta al archivo JSON de la transcripción raw descargada.
+        use_whisper (bool): Si intentar cargar la transcripción de Whisper (.txt) en lugar de usar el texto del JSON raw.
+
+    Returns:
+        dict: Diccionario `call_data` con 'transcript' (texto plano) y 'call_metadata',
+              o None si los archivos necesarios no se encuentran o fallan al cargar.
+    """
+    log_data_loading_interaction('load_call_data', 'Attempt', f'Loading data for call ID: {call_id}')
+
+    data_paths = config_manager.get("data_paths")
+    k_plus_dir = data_paths["k_plus_data"]
+    whisper_transcript_dir = data_paths["whisper_transcripts"]
+    wrapup_codes_mapping = config_manager.get_ref_data("wrapup_codes") # Cargar mapeo de wrap-up codes
+
+    raw_transcript_json = None
+    transcript_content = None # El texto plano final a usar para evaluación
+
+    # --- 1. Cargar y Parsear el JSON de Transcripción Raw ---
+    try:
+        with open(raw_transcript_filepath, 'r', encoding='utf-8') as f:
+            raw_transcript_json = json.load(f)
+        log_data_loading_interaction('load_raw_transcript', 'Success', f'Loaded raw transcript JSON from: {raw_transcript_filepath}')
+
+        # Extraer datos clave del JSON raw
+        conversation_id = raw_transcript_json.get("conversationId", call_id) # Usar el del JSON si está, sino el pasado
+        communication_id = raw_transcript_json.get("communicationId", call_id) # communicationId
+        call_type = "Desconocido"
+        wrap_up_code = None
+        wrapup_info = {} # Información detallada del wrap-up code
+
+        participants = raw_transcript_json.get("participants", [])
+        for participant in participants:
+             # Intentar obtener la dirección inicial del primer participante
+             if call_type == "Desconocido" and participant.get("initialDirection"):
+                  call_type = "saliente" if participant["initialDirection"] == "outbound" else "entrante"
+             # Buscar el wrapUpCode del agente
+             if participant.get("participantPurpose") == "agent":
+                 wrap_up_code = participant.get("wrapUpCode")
+                 if wrap_up_code and wrapup_codes_mapping:
+                     wrapup_info = wrapup_codes_mapping.get(wrap_up_code, {})
+                 break # Asumimos un solo agente principal con wrap-up
+
+        # Extraer el texto plano formateado del JSON raw
+        transcript_content_raw_formatted = extract_formatted_transcript_text(raw_transcript_json)
+
+    except FileNotFoundError:
+        log_data_loading_interaction('load_raw_transcript', 'Error', f'Raw transcript file not found for call {call_id} at {raw_transcript_filepath}')
+        return None # No se puede continuar sin el JSON raw
+    except json.JSONDecodeError:
+        log_data_loading_interaction('load_raw_transcript', 'Error', f'Error decoding JSON for raw transcript: {raw_transcript_filepath}.', {"call_id": call_id})
+        return None
+    except Exception as e:
+        log_data_loading_interaction('load_raw_transcript', 'Error', f'An unexpected error occurred loading raw transcript {raw_transcript_filepath}: {e}', {"call_id": call_id})
+        return None
+
+    # --- 2. Intentar cargar Transcripción Whisper si aplica ---
+    if use_whisper:
+        whisper_filepath = os.path.join(whisper_transcript_dir, f"{call_id}.txt")
+        try:
+            with open(whisper_filepath, 'r', encoding='utf-8') as f:
+                transcript_content_whisper = f.read()
+            if transcript_content_whisper.strip(): # Usar la de Whisper si no está vacía
+                transcript_content = transcript_content_whisper.strip()
+                log_data_loading_interaction('load_whisper_transcript', 'Success', f'Loaded Whisper transcript from: {whisper_filepath}. Using for evaluation.')
+            else:
+                 # Si el archivo Whisper está vacío, usar la transcripción del JSON raw
+                 transcript_content = transcript_content_raw_formatted
+                 log_data_loading_interaction('load_whisper_transcript', 'Warning', f'Whisper transcript file {whisper_filepath} is empty. Falling back to raw transcript text.')
+
+        except FileNotFoundError:
+            # Si no se encuentra el archivo Whisper, usar la transcripción del JSON raw
+            transcript_content = transcript_content_raw_formatted
+            log_data_loading_interaction('load_whisper_transcript', 'Warning', f'Whisper transcript file not found for call {call_id} at {whisper_filepath}. Falling back to raw transcript text.')
+        except Exception as e:
+             # Otros errores al cargar Whisper, usar la del JSON raw
+             transcript_content = transcript_content_raw_formatted
+             log_data_loading_interaction('load_whisper_transcript', 'Error', f'Error loading Whisper transcript {whisper_filepath}: {e}. Falling back to raw transcript text.', {"call_id": call_id})
+    else:
+        # Si use_whisper es False, usamos directamente la transcripción formateada del JSON raw
+        transcript_content = transcript_content_raw_formatted
+        log_data_loading_interaction('load_whisper_transcript', 'Info', 'use_whisper is False. Using raw transcript text for evaluation.')
+
+    # Si a pesar de todo la transcripción está vacía, no podemos evaluar
+    if not transcript_content:
+         log_data_loading_interaction('load_call_data', 'Error', f'Final transcript content is empty for call {call_id}. Cannot evaluate.')
+         return None
+
+
+    # --- 3. Cargar Metadatos y Datos de K+ (Incluyendo generación dummy si falta) ---
+    # Asumimos que los datos de K+ están en un archivo JSON con el mismo call_id
+    metadata_filepath = os.path.join(k_plus_dir, f"{call_id}.json")
+    k_plus_data_snapshot = None # Inicializar como None
+
+    try:
+        with open(metadata_filepath, 'r', encoding='utf-8') as f:
+            # Los datos de K+ se espera que estén dentro de una clave 'k_plus_data_snapshot'
+            # en el JSON de metadatos. Si el archivo K+ solo contiene el snapshot directo,
+            # ajusta esta carga. Aquí esperamos {"call_id": ..., "call_type": ..., "k_plus_data_snapshot": {...}}
+            metadata_from_file = json.load(f)
+            k_plus_data_snapshot = metadata_from_file.get("k_plus_data_snapshot")
+            # Podemos fusionar otros metadatos del archivo K+ aquí si no vienen del JSON raw
+            # Por ejemplo, call_type, duration, k_plus_incident pueden venir del archivo K+
+            # si no se extraen del JSON raw. Priorizaremos la info del JSON raw si está disponible.
+            # Para la POC, mantenemos la estructura de metadata cargada y usamos k_plus_data_snapshot para el LLM.
+            log_data_loading_interaction('load_k_plus_metadata', 'Success', f'Loaded K+ data from: {metadata_filepath}')
+
+    except FileNotFoundError:
+        log_data_loading_interaction('load_k_plus_metadata', 'Warning', f'K+ data file not found for call {call_id} at {metadata_filepath}. Generating dummy data.')
+        # Si el archivo K+ no existe, GENERAR DATOS DUMMY
+        # Lógica dummy adaptada de main_workflow y load_call_data anterior
+        dummy_k_plus_data = {
+            "direccion_valido": f"C/ Dummy {call_id.split('_')[-1]}",
+            "telefonos_validos": [f"555-DUMMY-{call_id.split('_')[-1]}"],
+            "emails_validos": [f"dummy_{call_id}@example.com"],
+            "fecha_nacimiento": "1990-01-01",
+            "dni_nie_completo": f"DUMMY{call_id.split('_')[-1]}Z",
+            "abogado_personado": False,
+             "tiene_flag_argumentario_prescripcion": False,
+            "fecha_flag_argumentario_prescripcion": None,
+             "estado_registro_direccion_nueva_hablada_en_call": None,
+             "estado_registro_telefono_nuevo_hablado_en_call": None,
+             "estado_registro_email_nuevo_hablado_en_call": None,
+             "numero_telefonos_total_en_k": 1,
+             "numero_emails_total_en_k": 1,
+             "datos_contractuales": {"cedente": "Dummy Corp", "producto": "Dummy Debt", "importe_pendiente": 999.99}
+        }
+        k_plus_data_snapshot = dummy_k_plus_data # Usar los datos dummy
+
+
+    except json.JSONDecodeError:
+         log_data_loading_interaction('load_k_plus_metadata', 'Error', f'Error decoding JSON from K+ data file {metadata_filepath} for call {call_id}. Generating dummy data.', {"call_id": call_id})
+         # Generar dummy data en caso de error de parsing
+         dummy_k_plus_data = { # Replicar estructura dummy
+            "direccion_valido": "Error Loading Dummy Address", "telefonos_validos": [], "emails_validos": [],
+            "fecha_nacimiento": None, "dni_nie_completo": None, "abogado_personado": False,
+             "tiene_flag_argumentario_prescripcion": False, "fecha_flag_argumentario_prescripcion": None,
+             "estado_registro_direccion_nueva_hablada_en_call": None, "estado_registro_telefono_nuevo_hablado_en_call": None,
+             "estado_registro_email_nuevo_hablado_en_call": None,
+             "numero_telefonos_total_en_k": 0, "numero_emails_total_en_k": 0,
+             "datos_contractuales": {}
+         }
+         k_plus_data_snapshot = dummy_k_plus_data
+
+    except Exception as e:
+         log_data_loading_interaction('load_k_plus_metadata', 'Error', f'An unexpected error occurred loading K+ data for call {call_id}: {e}. Generating dummy data.', {"call_id": call_id})
+         # Generar dummy data en caso de otros errores
+         dummy_k_plus_data = { # Replicar estructura dummy
+            "direccion_valido": "Error Loading Dummy Address", "telefonos_validos": [], "emails_validos": [],
+            "fecha_nacimiento": None, "dni_nie_completo": None, "abogado_personado": False,
+             "tiene_flag_argumentario_prescripcion": False, "fecha_flag_argumentario_prescripcion": None,
+             "estado_registro_direccion_nueva_hablada_en_call": None, "estado_registro_telefono_nuevo_hablado_en_call": None,
+             "estado_registro_email_nuevo_hablado_en_call": None,
+             "numero_telefonos_total_en_k": 0, "numero_emails_total_en_k": 0,
+             "datos_contractuales": {}
+         }
+         k_plus_data_snapshot = dummy_k_plus_data
+
+
+    # --- 4. Ensamblar call_metadata final ---
+    # Priorizamos info extraída del JSON raw, luego del archivo K+ si existe, luego defaults/dummy.
+    call_metadata = {}
+    call_metadata['call_id'] = call_id # conversationId por convención
+    call_metadata['conversationId'] = raw_transcript_json.get('conversationId', call_id) # Del JSON raw si existe
+    call_metadata['communicationId'] = raw_transcript_json.get('communicationId', call_id) # Del JSON raw si existe
+
+    # Extraer otros metadatos útiles del JSON raw si están disponibles
+    call_metadata['raw_duration_ms'] = raw_transcript_json.get('duration', {}).get('milliseconds') # Duración del array transcripts[].duration
+    call_metadata['raw_start_time_ms'] = raw_transcript_json.get('startTime') # StartTime del array transcripts[]
+    call_metadata['conversationStartTime'] = raw_transcript_json.get('conversationStartTime') # StartTime global de la conversación
+
+    # Intentar obtener duración total de la conversación si está disponible en el JSON raw global
+    call_metadata['duration'] = raw_transcript_json.get('conversationDuration') # Duración total de la conversación en ms
+    # Convertir duración a minutos si es útil (asumir ms)
+    if isinstance(call_metadata['duration'], (int, float)):
+         call_metadata['duration_minutes'] = call_metadata['duration'] / 60000.0
+    else:
+         call_metadata['duration_minutes'] = 0 # Default si no se encuentra
+
+
+    call_metadata['call_type'] = call_type # Direccion extraída del JSON raw
+    call_metadata['wrap_up_code'] = wrap_up_code # Código wrap-up extraído
+    call_metadata['wrap_up_info'] = wrapup_info # Info detallada del wrap-up del mapping
+
+    # Añadir otros flags o metadatos que puedan venir del archivo K+ (si se cargó) o que necesite el LLM
+    # Si el archivo K+ existía, fusionar sus claves principales aquí si no se han extraído ya del JSON raw
+    if 'metadata_from_file' in locals() and isinstance(metadata_from_file, dict):
+        for key, value in metadata_from_file.items():
+            if key not in call_metadata and key != 'k_plus_data_snapshot': # No sobrescribir si ya extraído del raw, ni añadir el snapshot como clave principal aquí
+                 call_metadata[key] = value
+
+    # Asegurar que flags/datos calculados necesarios para prompts estén presentes
+    # is_prescription_flag_recent se calculó arriba al cargar/generar dummy K+ data
+    call_metadata["is_prescription_flag_recent"] = call_metadata.get("is_prescription_flag_recent", False) # Asegurar que siempre existe
+    # Estos campos vienen de metadata/K+, no del JSON raw de transcripción
+    call_metadata['k_plus_incident'] = call_metadata.get('k_plus_incident', False)
+    call_metadata['intervener_present_in_3way'] = call_metadata.get('intervener_present_in_3way', False) # Asumir que esto viene de K+ o metadata externa
+    call_metadata['is_authorised_express'] = call_metadata.get('is_authorised_express', False) # Asumir que esto viene de K+ o metadata externa
+    call_metadata['corresponds_update'] = call_metadata.get('corresponds_update', False) # Asumir que esto viene de operativa/metadata
+
+    # Añadir el snapshot de datos de K+ (cargado o dummy)
+    call_metadata['k_plus_data_snapshot'] = k_plus_data_snapshot if k_plus_data_snapshot is not None else {} # Asegurar que es un dict
+
+
+    # Añadir la ruta de la transcripción cargada y si se usó Whisper para referencia
+    call_metadata['raw_transcript_filepath'] = raw_transcript_filepath # Ruta al JSON original
+    call_metadata['used_whisper_transcript'] = use_whisper
+    if use_whisper:
+        call_metadata['whisper_transcript_filepath'] = os.path.join(whisper_transcript_dir, f"{call_id}.txt")
+
+
+    # --- 5. Ensamblar el diccionario final para evaluación ---
+    call_data = {
+        "transcript": transcript_content, # El texto (Whisper si aplica, raw formateado si no)
+        "call_metadata": call_metadata # Todos los metadatos y K+
+    }
+
+    log_data_loading_interaction('load_call_data', 'Success', f'Data prepared for call {call_id}.')
+    return call_data
+
+
+
+6. Actualizar src/main_workflow.py (para usar el filtro y cargar los IDs correctos)
+Modificamos el flujo para incluir el paso de filtro y asegurar que se procesen las llamadas filtradas.
+
+
+import os
+import glob
+from datetime import datetime, timedelta
+from pytz import timezone
+import pytz
+
+from src.config import config_manager
+from src.data_acquisition import downloader
+from src.audio_processing import whisper_processor # Usado solo si use_whisper es True
+from src.data_preparation import data_loader, transcript_filter # Importar filtro
+from src.evaluation import evaluate_with_llm, apply_post_processing, EVALUATION_STRUCTURE
+from src.results import results_handler
+
+def main():
+    """
+    Función principal que ejecuta el pipeline de evaluación.
+    """
+    print("--- Starting Automated Call Evaluation Pipeline ---")
+
+    # 1. Cargar Configuración
+    config = config_manager
+
+    data_paths = config.get("data_paths")
+    pipeline_config = config.get("pipeline")
+    genesys_config = config.get("genesys_cloud")
+
+    if not data_paths or not pipeline_config or not genesys_config:
+        print("Error: Failed to load essential configuration. Exiting.")
+        return
+
+    # Asegurar directorios existen
+    for path_key in data_paths.values():
+        if isinstance(path_key, str):
+             os.makedirs(path_key, exist_ok=True)
+
+
+    # 2. Adquisición de Datos (Genesys Transcriptions Download)
+    print("\nStep 2: Data Acquisition (Genesys Transcriptions Download)")
+    download_date_range_config = pipeline_config.get("download_date_range")
+    datetime_format_config = pipeline_config.get("download_datetime_format")
+    timezone_config = pipeline_config.get("download_timezone")
+
+    # Lista para almacenar las rutas de las transcripciones raw descargadas
+    raw_transcript_filepaths = []
+
+    if download_date_range_config and download_date_range_config.get("start_datetime") and download_date_range_config.get("end_datetime"):
+        start_datetime_str = download_date_range_config["start_datetime"]
+        end_datetime_str = download_date_range_config["end_datetime"]
+
+        try:
+             # Convertir el rango de fechas/horas de string a datetime con zona horaria para pasarlo al downloader
+             tz = timezone(timezone_config)
+             start_datetime_dt = tz.localize(datetime.strptime(start_datetime_str, datetime_format_config))
+             end_datetime_dt = tz.localize(datetime.strptime(end_datetime_str, datetime_format_config))
+             log_data_loading_interaction('main_workflow', 'Info', f'Processing date range: {start_datetime_dt.isoformat()} to {end_datetime_dt.isoformat()}')
+
+             raw_transcript_filepaths = downloader.download_transcriptions_batch(start_datetime_str, end_datetime_str) # Pasar strings al downloader para que él haga el parseo interno con su config
+
+        except (ValueError, pytz.UnknownTimeZoneError) as e:
+             log_data_loading_interaction('main_workflow', 'Error', f'Error parsing download date range or timezone from config: {e}')
+             print(f"Error parsing date range from config: {e}. Please check settings.yaml.")
+             # raw_transcript_filepaths seguirá siendo []
+
+        if raw_transcript_filepaths:
+             print(f"Successfully downloaded {len(raw_transcript_filepaths)} raw transcript files.")
+        else:
+             print("No raw transcripts were downloaded successfully for the specified date range.")
+    else:
+        print("Download datetime range not specified in config/settings.yaml or is incomplete. Skipping download step.")
+        # Si se salta la descarga, asumimos que los archivos JSON ya están en data/raw_transcripts/
+        print(f"Assuming raw transcripts (JSON) are already in {data_paths['raw_transcripts']}.")
+        raw_transcript_filepaths = glob.glob(os.path.join(data_paths["raw_transcripts"], "*.json"))
+        print(f"Found {len(raw_transcript_filepaths)} existing raw transcript files.")
+
+    if not raw_transcript_filepaths:
+         print("No raw transcript files available after attempted download or finding existing. Exiting pipeline.")
+         return # Salir si no hay nada que filtrar
+
+
+    # 3. Filtrado de Transcripciones Descargadas (por Wrap-up Code)
+    print("\nStep 3: Filtering Raw Transcripts")
+    # Llamar a la función de filtro con la lista de archivos descargados/encontrados
+    # El filtro devolverá una lista de diccionarios {'conversationId', 'communicationId', 'filepath'}
+    # para los archivos que pasaron o fueron incluidos si el filtro está deshabilitado.
+    filtered_calls_info = transcript_filter.filter_transcriptions(raw_transcript_filepaths)
+
+    if not filtered_calls_info:
+        print("No transcripts passed the filter or none were included (if filter disabled). Exiting pipeline.")
+        return # Salir si no hay nada que procesar después del filtro
+
+
+    # 4. Procesamiento de Audio (Whisper) - Condicional
+    # Este paso se activa si use_whisper es True y hay archivos de audio correspondientes
+    # a las transcripciones *filtradas*.
+    use_whisper = pipeline_config.get("use_whisper", False)
+
+    # Lista de diccionarios {IDs, filepath} para las transcripciones que se usarán para la evaluación
+    # Por defecto, usamos las raw filtradas
+    transcriptions_for_evaluation_info = filtered_calls_info
+
+
+    if use_whisper:
+         print("\nStep 4: Audio Processing (Whisper) - PLACEHOLDER")
+         print("This step would process downloaded audio files corresponding to filtered transcripts.")
+         # Lógica futura:
+         # raw_calls_dir = data_paths["raw_calls"]
+         # # Necesitas descargar audios en Step 2 o antes, y nombrarlos consistentemente (ej. [conversationId].wav)
+         # audio_files_to_process = [os.path.join(raw_calls_dir, f"{call_info['conversationId']}.wav") for call_info in filtered_calls_info]
+         # # Filtrar para solo procesar audios que existen
+         # audio_files_to_existing = [f for f in audio_files_to_process if os.path.exists(f)]
+         #
+         # if audio_files_to_existing:
+         #      processed_whisper_paths = whisper_processor.process_audio_batch(audio_files_to_existing)
+         #      if processed_whisper_paths:
+         #           # Si se procesó con Whisper, necesitamos mapear los archivos .txt generados de vuelta a sus conversationId
+         #           # Asumimos que whisper_processor nombra los archivos .txt como [conversationId].txt
+         #           whisper_transcripts_map = {os.path.splitext(os.path.basename(p))[0]: p for p in processed_whisper_paths}
+         #           # Actualizar la lista info_para_evaluacion para usar las rutas de Whisper si existen
+         #           transcriptions_for_evaluation_info = []
+         #           for call_info in filtered_calls_info:
+         #                conv_id = call_info['conversationId']
+         #                whisper_path = whisper_transcripts_map.get(conv_id)
+         #                if whisper_path:
+         #                     # Usar la ruta de Whisper y marcar que se usó Whisper
+         #                     transcriptions_for_evaluation_info.append({
+         #                          'conversationId': conv_id,
+         #                          'communicationId': call_info['communicationId'],
+         #                          'filepath': whisper_path, # Ruta al archivo .txt de Whisper
+         #                          'used_whisper': True
+         #                     })
+         #                else:
+         #                     # Si no hay audio o Whisper falló para este call_id, usar la raw filtrada
+         #                     transcriptions_for_evaluation_info.append({
+         #                          'conversationId': conv_id,
+         #                          'communicationId': call_info['communicationId'],
+         #                          'filepath': call_info['filepath'], # Ruta al archivo .json raw
+         #                          'used_whisper': False
+         #                     })
+         #
+         #           print(f"Whisper processing completed. Using {len([c for c in transcriptions_for_evaluation_info if c.get('used_whisper')])} Whisper transcripts and {len([c for c in transcriptions_for_evaluation_info if not c.get('used_whisper', True)])} raw filtered transcripts for evaluation.")
+         #
+         #      else:
+         #           print("Whisper processing failed or returned no files. Falling back to raw filtered transcripts for all.")
+         #           # transcriptions_for_evaluation_info ya es filtered_calls_info, y use_whisper flag se gestionará en data_loader
+         # else:
+         #      print("No corresponding audio files found for filtered transcripts to process with Whisper. Using raw filtered transcripts.")
+         #      # transcriptions_for_evaluation_info ya es filtered_calls_info, y use_whisper flag se gestionará en data_loader
+
+    else:
+        print("\nStep 4: Audio Processing (Skipped as per configuration)")
+        print(f"Using raw filtered transcripts from {data_paths['raw_transcripts']} for evaluation.")
+        # Asegurar que la info_para_evaluacion tenga el flag use_whisper=False si no se intentó
+        for call_info in transcriptions_for_evaluation_info:
+             call_info['used_whisper'] = False
+
+
+    # 5. Carga de Datos para Evaluación
+    print(f"\nStep 5: Data Loading for Evaluation ({len(transcriptions_for_evaluation_info)} calls)")
+
+    all_evaluation_results_flat = [] # Lista plana para todos los resultados de todos los ítems/llamadas
+
+    if not transcriptions_for_evaluation_info:
+        print("No calls identified for evaluation after filtering and optional Whisper step. Exiting.")
+        return
+
+
+    for call_info in transcriptions_for_evaluation_info:
+        call_id = call_info['conversationId'] # Usar conversationId como el ID de la llamada
+        raw_transcript_filepath = call_info['filepath'] # Ruta al JSON raw (el filtro opera sobre estos)
+        use_whisper_for_this_call = call_info.get('used_whisper', False) # Usar flag específico si se intentó Whisper
+
+
+        # Cargar datos para la llamada actual
+        # data_loader ahora toma la RUTA al JSON raw y el flag use_whisper
+        call_data = data_loader.load_call_data_for_evaluation(
+            call_id, # conversationId
+            raw_transcript_filepath, # Ruta al JSON raw
+            use_whisper=use_whisper_for_this_call # Flag si se usará Whisper para el texto
+        )
+
+
+        if not call_data or not call_data.get("transcript"):
+            print(f"Skipping evaluation for call {call_id} due to data loading error or missing transcript content.")
+            # Añadir resultados de "N/A" o "Error" para esta llamada y todos sus ítems esperados
+            all_item_ids = [id for group in EVALUATION_STRUCTURE.values() for id in group['item_ids']]
+            error_results = [{"call_id": call_id, "conversationId": call_info.get('conversationId'), "communicationId": call_info.get('communicationId'), "item_id": item_id, "result": "Error", "reason": "Failed to load transcript or data.", "transcript_segment": ""} for item_id in all_item_ids]
+            all_evaluation_results_flat.extend(error_results)
+            continue
+
+        # 6. Evaluación con LLM
+        print(f"\nStep 6: Evaluation for call {call_id}")
+        initial_results_for_call = []
+        eval_structure_keys = pipeline_config.get("items_to_evaluate")
+        if not eval_structure_keys:
+            eval_structure_keys = EVALUATION_STRUCTURE.keys()
+            print("No specific items_to_evaluate defined in config. Evaluating all defined groups/items.")
+        else:
+             valid_eval_keys = [k for k in eval_structure_keys if k in EVALUATION_STRUCTURE]
+             if len(valid_eval_keys) != len(eval_structure_keys):
+                  print(f"Warning: Some evaluation keys from config were not found in EVALUATION_STRUCTURE: {set(eval_structure_keys) - set(valid_eval_keys)}")
+             eval_structure_keys = valid_eval_keys
+
+
+        for evaluation_key in eval_structure_keys:
+             item_ids_in_group = EVALUATION_STRUCTURE[evaluation_key]["item_ids"]
+             print(f"  Evaluating group/item: {evaluation_key} ({item_ids_in_group}) for call {call_id}")
+
+             # Llamada a la función de evaluación con LLM
+             group_results = evaluate_with_llm(evaluation_key, call_data['transcript'], call_data['call_metadata'])
+             initial_results_for_call.extend(group_results) # Añadir todos los resultados (puede ser 1 o varios)
+
+
+        # 7. Post-Procesamiento
+        print(f"\nStep 7: Post-Processing for call {call_id}")
+        final_results_for_call = apply_post_processing(initial_results_for_call, call_data['call_metadata'])
+
+        # --- Añadir conversationId y communicationId a cada resultado individual ---
+        # Ahora estos IDs vienen directamente de call_metadata, poblado por data_loader
+        conversation_id_for_results = call_data['call_metadata'].get('conversationId', call_id)
+        communication_id_for_results = call_data['call_metadata'].get('communicationId', call_id)
+
+        for res in final_results_for_call:
+            if 'call_id' not in res:
+                 res['call_id'] = call_id # Asegurar el ID de la llamada (conversationId)
+            # Añadir los IDs de Genesys
+            res['conversationId'] = conversation_id_for_results
+            res['communicationId'] = communication_id_for_results
+
+        all_evaluation_results_flat.extend(final_results_for_call)
+
+
+    # 8. Guardar Resultados
+    print("\nStep 8: Saving Results")
+    if all_evaluation_results_flat:
+        # Guardar en JSON
+        results_handler.save_evaluation_results_to_json(all_evaluation_results_flat, "evaluation_output.json")
+        # Guardar en CSV (si necesitas) - Asegúrate de que todos los diccionarios tengan las mismas claves para CSV
+        # Puedes necesitar una función auxiliar para asegurar consistencia de claves para CSV.
+        # results_handler.save_evaluation_results_to_csv(all_evaluation_results_flat, "evaluation_output.csv")
+    else:
+        print("No evaluation results generated to save.")
+
+
+    print("\n--- Automated Call Evaluation Pipeline Finished ---")
+
+
+# Punto de entrada del script
+if __name__ == "__main__":
+    main()
+
+Con estos cambios, el pipeline ahora:
+ * Descarga las transcripciones raw JSON de Genesys para un rango de fechas/horas.
+ * Filtra estas transcripciones basándose en el wrap-up code del agente, eliminando archivos que no cumplen el criterio y obteniendo una lista de info (IDs, ruta de archivo) para los que pasaron.
+ * En el paso de carga de datos (data_loader), para cada archivo filtrado:
+   * Carga el JSON raw.
+   * Extrae el conversationId, communicationId, dirección de llamada, wrapUpCode del agente.
+   * Usa el mapeo de wrapup_codes.json para obtener la información detallada del wrap-up.
+   * Genera la transcripción de texto plano formateada (Agente: ..., Interlocutor: ...) a partir del JSON raw.
+   * Si use_whisper es True, intenta cargar el archivo de Whisper .txt (asumiendo que se llamaría igual) y usa su contenido si existe y no está vacío, de lo contrario, usa el texto del JSON raw.
+   * Carga los datos de K+ (generando dummy si falta).
+   * Ensambla un diccionario call_metadata rico con toda esta información (IDs, dirección, wrap-up info, K+ snapshot, etc.).
+ * El resto del pipeline (evaluator, postprocessor, results_handler) trabaja con este call_data enriquecido.
+ * Los IDs de Genesys (conversationId, communicationId) se añaden a cada resultado de ítem en el paso 7 del main_workflow antes de guardar.
+Recuerda adaptar el mapeo de wrapup_codes.json y la lógica de extracción de texto en data_loader.py (extract_formatted_transcript_text) si la estructura exacta de tu JSON de transcripción de Genesys difiere del ejemplo proporcionado.
