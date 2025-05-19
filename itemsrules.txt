@@ -1,0 +1,226 @@
+
+Tienes toda la razón. Dada la complejidad de las reglas de evaluación, las múltiples excepciones y la necesidad de que el LLM (especialmente gpt-3.5-turbo) interprete correctamente tanto la transcripción como la estructura detallada del k_plus_data_snapshot, intentar evaluar los 7 ítems del bloque "Inicio Llamada" en un solo prompt podría ser demasiado ambicioso para una POC y podría resultar en una calidad de evaluación baja o inconsistente para ese bloque.
+Es una trade-off válida entre coste (más llamadas API) y calidad/fiabilidad (instrucciones más simples por llamada API). Para esta fase de POC, donde buscas validar la lógica de evaluación de cada ítem, priorizar la fiabilidad de la respuesta del LLM por ítem individual es una estrategia sensata, aunque temporalmente aumente el coste.
+Sugerencia: Volver a evaluar los ítems 1, 2, 3, 4, 5, 6, y 7 como llamadas individuales al LLM, de la misma manera que ya tratamos 17, 20 y 26.
+Esto implicará los siguientes cambios en src/evaluation/item_rules.py:
+
+
+item_rules.py:
+ * Modificar EVALUATION_STRUCTURE para reemplazar la entrada "inicio_llamada_group" por entradas individuales para cada ítem del 1 al 7 (ej. "item_1_individual", "item_2_individual", etc.).
+ * Cada una de estas nuevas entradas individuales utilizará una plantilla de prompt genérica para ítems individuales (similar a la que ya tenemos para 17, 20, 26).
+ * Los rules_detail para cada ítem (1-7) permanecerán como están, ya que son las reglas específicas para ese ítem y se incluirán en el prompt individual correspondiente.
+Aquí tienes el código actualizado para src/evaluation/item_rules.py reflejando esta separación.
+Actualización de src/evaluation/item_rules.py
+
+# Este archivo contiene la definición de las reglas de evaluación
+# y la estructura que define cómo se agrupan los ítems para la evaluación LLM.
+
+# --- Definición de Items y sus reglas (completo para los 10 ítems en scope) ---
+# COPIA AQUÍ EL CONTENIDO DEL DICCIONARIO 'ITEM_RULES' DEL PASO ANTERIOR
+# Asegúrate de que las reglas hagan referencia explícita a los campos
+# dentro de 'k_plus_data_snapshot' cuando sea necesario.
+ITEM_RULES = {
+    # Bloque 1: Inicio Llamada (Ahora evaluados individualmente en la POC)
+    "1": { "name": "Saludo+Identificación (agente+empresa)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+            - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+            - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+            - Excepciones y otras consideraciones: Si agente solo indica su nombre, se acepta. Si frase en diferente orden, se acepta.
+            - Relación con otros ítems: Sin relación directa.
+            """},
+    "2": { "name": "Informar posible grabación llamada + GDPR", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Informar siguiendo argumentario en TODAS llamadas salientes (incl. callback). RedSys: informar parar/reanudar grabación. Añadir persona: identificarse e informar grabación.
+            - Excepciones: Cliente interrumpe, no se valora (Pass). Frase no exacta pero informa, correcto (Pass). Empresas autorizadas con NDA, no es necesario informar (Pass/N/A si aplica).
+            - Relación con otros ítems: Sin relación directa.
+            """},
+    "3": { "name": "Identificación interlocutor (buscar confirmación)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Agente debe buscar confirmación de que habla con la persona correcta (cliente).
+            - Llamadas IN: Solicitar interlocutor facilite nombre y motivo. Si es cliente, pedir Nombre Completo, DNI, Fecha Nacimiento. -> **Los datos de referencia son Nombre Completo, SSN, Birth Date de los suscriptores en k_plus_data_snapshot.subscribers.**
+            - Llamadas OUT: Preguntar por interviniente con Nombre y Apellidos. Debe responder afirmativamente a "¿Es usted?". No basta con "Sí", "Dígame". -> **Verificar si el nombre mencionado en la transcripción corresponde a full_name de los suscriptores en k_plus_data_snapshot.subscribers.**
+            - Excepciones: Interlocutor en llamada IN referencia su deuda ("llamo por mi tarjeta"), NO necesario el check "¿es usted?" (Pass). Llamada IN: agente pide datos ANTES de saber si es cliente, penaliza. Llamada IN: agente lee nombre SIN solicitar interlocutor lo facilite, penaliza. Penalizar solicitar 3 últimos dígitos DNI SIN negativa previa a confirmar completo (relacionado con Ítem 4, pero penaliza aquí).
+            - Relación con otros ítems: Sin relación directa.
+            """},
+    "4": { # Ítem crítico
+           "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Evalúa correcta identificación (Nombre Completo, DNI/NIE, Fecha Nacimiento) según tipo llamada.
+           - Los datos de referencia son los detalles de los suscriptores disponibles en **k_plus_data_snapshot.subscribers** (lista de personas asociadas al Subscriber ID principal). Cada entrada en esta lista puede tener 'full_name', 'ssn', 'birth_date'.
+           - Llamadas Salientes: Confirmar nombre completo Y facilitar DNI/NIE completo.
+           - Llamadas Entrantes: Confirmar nombre completo + DNI/NIE completo + fecha nacimiento.
+           - Excepciones:
+             - NO informar motivo antes identificar.
+             - Solo solicitar 3 últimos dígitos DNI/NIE si hay NEGATIVA previa. (La penalización por pedir 3 últimos SIN negativa previa va en Ítem 3). Aquí se valora si la excepción se aplicó correctamente DESPUÉS de una negativa.
+             - Si **'birth_date' NO está presente o es null/vacío** en los datos del suscriptor en **k_plus_data_snapshot.subscribers** Y el agente valida por dirección (comparar con las direcciones en **k_plus_data_snapshot.addresses_valid_0_2**), se considera correcto.
+             - Llamadas entrantes por SMS/perdida donde agente da nombre: Válido si sigue resto (pide DNI/fecha nacimiento).
+             - Autorizados expresos: (Nueva lógica añadida) Para Autorizados expresos (**k_plus_data_snapshot.is_authorised_express** es true, este flag debería venir en k_plus_data_snapshot si aplica), se pide Nombre completo + SSN del Autorizado (no se verifica con BD). PERO se deben verificar los datos del Interviniente asociado: Nombre completo + SSN. -> **Verificar si el agente pide Nombre + SSN del autorizado Y si busca corroborar Nombre completo + SSN del interviniente principal usando k_plus_data_snapshot.subscribers.**
+           - Relación con Ítem 17: Si info contractual a NO interviniente (Ítem 4 Fail por persona incorrecta), fallo principal en Ítem 17.
+           """},
+    "5": { "name": "Motivo llamada-identificar expediente. Prescripción", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Manejo correcto de información de prescripción o productos/cedente/importes.
+           - La información de referencia está en **k_plus_data_snapshot**: 'flag_argumentario_prescripcion' (dict con 'flag_active' bool y 'last_update_date' string), 'is_prescription_flag_recent' (bool calculado), 'producto', 'cedente', 'importe_deuda'.
+           - Regla adicional para determinar si CORRESPONDE hacer prescripción:
+             - Si **k_plus_data_snapshot.flag_argumentario_prescripcion.flag_active** es true Y **k_plus_data_snapshot.is_prescription_flag_recent** es true => NO corresponde realizar prescripción, solo identificar motivo llamada informando **k_plus_data_snapshot.producto**, **k_plus_data_snapshot.cedente**, **k_plus_data_snapshot.importe_deuda**.
+             - Si **k_plus_data_snapshot.flag_argumentario_prescripcion.flag_active** es false O **k_plus_data_snapshot.is_prescription_flag_recent** es false => SÍ corresponde realizar prescripción. En este caso, el agente debe usar el texto de prescripción (no proporcionado aquí, pero asume que implica usar/mencionar) y los campos: **k_plus_data_snapshot.producto**, **k_plus_data_snapshot.cedente**, **k_plus_data_snapshot.importe_deuda**.
+           - Si aplica prescripción: debe ajustarse fielmente al texto facilitado (no provisto) y con datos (**producto, cedente, importe_deuda**) correctos. -> **Verificar si el agente usa estos datos de k_plus_data_snapshot y si los menciona correctamente si CORRESPONDÍA hacer prescripción/informar motivo.**
+           - Si expediente NO tiene flag O flag > 3 meses Y hace prescripción: DEBE mencionar que registrará flag (no puedes verificar el registro real en BD). -> **Verificar si k_plus_data_snapshot.flag_argumentario_prescripcion.flag_active es false o k_plus_data_snapshot.is_prescription_flag_recent es false Y el agente menciona registrar la flag en la transcripción.**
+           - Penalizar si se facilitan datos erróneos (**producto, cedente, importe_deuda** de k_plus_data_snapshot) en la transcripción.
+           - Si error corregido MÁS TARDE: NO penaliza (Pass). -> **Verificar si el agente rectifica el dato erróneo en la transcripción.**
+           - Excepciones: Al hacer prescripción NO indica tipo interviniente ("usted tiene un préstamo") pero es cliente principal (ej. cliente dice "tengo una tarjeta" y es único cliente - asume esta información si no está en k_plus_data_snapshot si es relevante): NO penaliza (Pass).
+           - Relación con Ítem 14: Si datos erróneos en prescripción y error mantenido, penalización en Ítem 5, NO Ítem 14. Tu tarea es identificar el error y si se corrigió DENTRO de esta llamada.
+           """},
+    "6": { # Ítem crítico
+           "name": "Confirmar datos contacto (dirección, teléfono, email)", "complexity": "MEDIO", "description": "...",
+            "rules_detail": """
+            Valora si se confirman COMPLETOS todos los datos de contacto marcados "VALIDO" en K+.
+            - Los datos de referencia son las listas de contactos válidos en **k_plus_data_snapshot**: 'addresses_valid_0_2', 'phones_valid_0_2', 'emails_valid_0_2'. Cada entrada en estas listas tiene 'address', 'phone_number', o 'email' y 'valid_code' (0 o 2).
+            - Válido SÓLO si el agente confirma, de manera COMPLETA, **TODOS** los contactos presentes en **k_plus_data_snapshot.addresses_valid_0_2**, **k_plus_data_snapshot.phones_valid_0_2**, Y **k_plus_data_snapshot.emails_valid_0_2** en la transcripción.
+            - EXCEPCIONES (gestionadas en código de post-procesamiento): NO valora llamadas < 4 minutos. NO valora si incidencias K+ reportadas (**k_plus_data_snapshot.k_plus_incident** es true, este flag debería venir en k_plus_data_snapshot si aplica).
+            - Relación con Ítem 21: Si por operativa NO toca confirmar datos pero se hace de forma incompleta, o si hay un envío SMS/Mail y se confirma solo el telf/mail usado dejando otros sin confirmar, se evaluaría en Ítem 21, NO en Ítem 6. Si hay envío SMS/Mail y no se confirman datos pero YA se confirmaron el último mes, se valora en Ítem 21. Si identificas una de estas situaciones en la transcripción (confirmación incompleta de datos 'VALIDO' existentes cuando SÍ tocaba confirmar), marca como Fail en Ítem 6 y en la razón indica la situación.
+            - Relación con Ítem 7: Solicitar datos adicionales DESPUÉS de confirmar datos sistema -> Ítem 7, NO Ítem 6.
+            """},
+    "7": { "name": "Solicitar datos contacto adicionales", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si se solicitan datos de contacto adicionales (teléfono, mail) cuando corresponde.
+            - Los datos de referencia son los conteos de contactos válidos en **k_plus_data_snapshot**: 'numero_telefonos_total_validos' y 'numero_emails_total_validos'.
+            - La solicitud de datos adicionales (teléfono fijo/móvil y email si no tenemos uno) debe hacerse en todas nuestras confirmaciones y/o actualizaciones de datos (**k_plus_data_snapshot.corresponds_update** es true, este flag debería venir en k_plus_data_snapshot si aplica).
+            - SOLO se valora la SOLICITUD en la transcripción, no la correcta incorporación a BBDD (eso es Ítem 20).
+            - Se deben solicitar adicionales SI:
+              - 'numero_telefonos_total_validos' en **k_plus_data_snapshot** es 0 O 1.
+              - Y/O 'numero_emails_total_validos' en **k_plus_data_snapshot** es 0.
+            - Excepciones (marca N/A o Pass si aplica):
+              - NO se valorará si 'numero_telefonos_total_validos' > 1 AND 'numero_emails_total_validos' > 1 en **k_plus_data_snapshot**.
+              - NO se valorará si **k_plus_data_snapshot.corresponds_update** es false (No corresponde confirmación/actualización de datos).
+              - La operativa NO aplica para autorizados expresos (**k_plus_data_snapshot.is_authorised_express** es true, este flag debería venir en k_plus_data_snapshot si aplica).
+            - Relación con Ítem 20: Correcta incorporación a BBDD -> Ítem 20. Este ítem es SOLO sobre la SOLICITUD.
+            """},
+    # Ítems Críticos Individuales
+    "17": { # Ítem crítico
+           "name": "Tratamiento de la información con 3os", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Protección de información personal/contractual, evitando facilitarla a personas NO autorizadas.
+            - Penaliza facilitar info a NO autorizados.
+            - Los datos de referencia incluyen: **k_plus_data_snapshot.abogado_personado** (bool, debería venir si aplica) y si el interviniente ESTÁ presente en la llamada a 3 (**k_plus_data_snapshot.intervener_present_in_3way** bool, debería venir si aplica).
+            - EXCEPCIONES (N/A si aplica): Si el interviniente ESTÁ presente en la llamada a 3 (**k_plus_data_snapshot.intervener_present_in_3way** es true). Si abogados personados en K+ (**k_plus_data_snapshot.abogado_personado** es true), NO necesita autorización (Pass si se dio info a abogado personado).
+            - Relación con otros ítems: Sin relación directa relevante.
+            """},
+    "20": { # Ítem crítico
+           "name": "Alta / Asignación datos (dirección teléfonos, etc.)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si el agente habla de dar de alta un dato nuevo necesario, o si discute un dato que NO debe darse de alta, **Y si la evidencia en k_plus_data_snapshot sugiere que la acción se realizó correctamente o incorrectamente si se discutió en la llamada.**
+            - Los datos de referencia de K+ incluyen: Listas de contactos por VALID (2) y la lista de teléfonos VALID=6/SOURCE=82 (**k_plus_data_snapshot.addresses_valid_2**, **k_plus_data_snapshot.phones_valid_2**, **k_plus_data_snapshot.emails_valid_2**, **k_plus_data_snapshot.phones_valid_6_source_82**).
+            - Penaliza cuando se habla de dar de alta dato nuevo necesario que NO SE HACE (según conv.) O se habla de dar de alta dato que POR OPERATIVA NO DEBE incorporarse (ej. Comisaría).
+            - **VERIFICAR en k_plus_data_snapshot:**
+              - Si el agente habla de registrar un **dato nuevo** (ej. nuevo teléfono dado por cliente en transcripción): Verificar si un dato con similar contenido aparece en **k_plus_data_snapshot.phones_valid_2**, **addresses_valid_2**, o **emails_valid_2**. Su presencia sugiere un registro VALID=2. Su ausencia o presencia en VALID=0/otra lista podría sugerir no se registró o no se registró con VALID=2.
+              - Si se discute dar de alta un dato que POR OPERATIVA NO DEBE incorporarse (ej. teléfono de Comisaría, Juzgado): Verificar si un teléfono mencionado en la transcripción aparece en la lista **k_plus_data_snapshot.phones_valid_6_source_82**. Si aparece, penaliza. Si el agente habla de registrarlo y aparece aquí, penaliza.
+            - Si discute alta dato nuevo con error evidente en conv. (ej. mencionar un CP erróneo para una dirección), penaliza, **y si la evidencia en k_plus_data_snapshot (ej. en addresses_valid_2) confirma un registro erróneo**.
+            - Relación con Ítem 21: Ciertas situaciones de alta con errores o datos no permitidos pueden valorarse en Ítem 21. En POC, si conversación muestra intento alta no permitido (teléfono de Comisaría, etc.) o discutir un alta con error evidente (ej. CP erróneo) relacionado con un dato *nuevo*, marca Fail en Ítem 20 y explica la razón. Si se habló de un alta nueva y no aparece en las listas VALID=2 en k_plus_data_snapshot, marca Fail en Ítem 20.
+            """},
+    "26": { # Ítem crítico
+           "name": "Ninguna amenaza o intimidación, ironía, frases inadecuadas. Sin provocaciones, sin juicios de valor", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Agente mantiene comportamiento respetuoso, profesional, SIN dañar imagen compañía.
+            - Evitar: NINGUNA amenaza/intimidación, NINGUNA ironía, NINGUNA frase inadecuada, SIN provocaciones, SIN juicios de valor. Enfócate en violaciones CLARAS Y GRAVES que dañan la imagen.
+            - Relación con Ítem 23 (Comunicación general): Mayoría problemas tono/comunicación penalizan Ítem 23. SOLO Ítem 26 si acción/lenguaje DAÑA CLARAMENTE IMAGEN o trato CRITICAMENTE INAPROPIADO/IRRESPECTUOSO según puntos listados.
+            """},
+    # ... COPIA LAS REGLAS RESTANTES SI HAY MÁS ÍTEMS ...
+}
+
+
+# --- Plantilla Genérica para Ítems Individuales ---
+# Esta plantilla se usará para todos los ítems que se evalúan de forma individual.
+# Incluye la transcripción, metadatos básicos, el snapshot de K+ y las reglas específicas del ítem.
+GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE = """
+Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos proporcionados para determinar si el agente cumplió con el Ítem {item_ids}: {item_name}.
+
+**Datos de la Llamada:**
+Tipo de Llamada (obtenido de origen): {call_type}
+Duración (mins): {call_duration}
+Wrap-up Code del Agente: {wrap_up_code}
+Info Wrap-up Code: {wrap_up_info}
+**Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+
+**Reglas de Evaluación (Ítem {item_ids}):**
+{all_items_rules_detail}
+
+Evalúa estrictamente basándote en la transcripción, los DATOS DE K+ (k_plus_data_snapshot) y las reglas proporcionadas.
+
+Formato de Salida (JSON):
+```json
+{{
+  "item_id": "{item_ids}",
+  "result": "Pass" | "Fail" | "N/A",
+  "reason": "Breve explicación (por qué Pass/Fail/N/A, citando evidencia de transcripción o datos K+).",
+  "transcript_segment": "Fragmento relevante (si aplica)"
+}}
+
+Asegúrate de que la salida sea JSON válido.
+"""
+
+--- Estructura de Evaluación (Define grupos e ítems individuales) ---
+Esta estructura define QUÉ se evalúa en CADA llamada al LLM.
+Ahora, todos los ítems en scope se evalúan de forma individual para la POC.
+EVALUATION_STRUCTURE = {
+"item_1_individual": {
+"item_ids": ["1"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_2_individual": {
+"item_ids": ["2"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_3_individual": {
+"item_ids": ["3"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_4_individual": {
+"item_ids": ["4"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_5_individual": {
+"item_ids": ["5"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_6_individual": {
+"item_ids": ["6"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_7_individual": {
+"item_ids": ["7"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_17_individual": {
+"item_ids": ["17"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_20_individual": {
+"item_ids": ["20"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+"item_26_individual": {
+"item_ids": ["26"],
+"prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE
+},
+# Añadir aquí las entradas para los demás ítems cuando tengas sus reglas definidas
+# "item_8_individual": { "item_ids": ["8"], "prompt_template": GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE },
+# ...
+}
+Las reglas detalladas de los ítems (ITEM_RULES) DEBEN referenciar ahora
+explícitamente los campos dentro del diccionario k_plus_data_snapshot
+que se pasa en el prompt_data.
+Asegúrate de que la redacción de 'rules_detail' indique al LLM cuándo debe mirar
+los datos de K+ y cómo interpretar las listas o valores específicos del snapshot.
+
+---
+
+Con esta actualización:
+
+1.  Cada uno de los 10 ítems en el alcance de la POC (`1` a `7`, `17`, `20`, `26`) se evalúa en una llamada separada al LLM. Esto aumenta la fiabilidad de la evaluación para cada ítem individual, especialmente con `gpt-3.5-turbo`.
+2.  Hemos introducido una plantilla de prompt genérica (`GENERIC_INDIVIDUAL_ITEM_PROMPT_TEMPLATE`) para simplificar la definición de `EVALUATION_STRUCTURE` cuando se evalúan ítems individualmente.
+3.  Los `rules_detail` para cada ítem *deben* ser revisados cuidadosamente para asegurar que instruyen correctamente al LLM sobre cómo usar la información disponible en el `k_plus_data_snapshot` (por ejemplo, cómo verificar el DNI/fecha nacimiento contra la lista de suscriptores, cómo verificar contactos contra las listas específicas de contactos válidos, cómo usar las flags de prescripción, etc.).
+
+Este enfoque te dará resultados más limpios y fiables por ítem en la POC, aunque aumentará el número de llamadas API por llamada de teléfono procesada (10 llamadas API por cada llamada de teléfono). La optimización de costes mediante agrupación se puede explorar de nuevo más adelante, quizás cuando uses modelos más potentes o hayas afinado mucho la lógica de los prompts individuales.
