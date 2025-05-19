@@ -2337,7 +2337,52 @@ EVALUATION_STRUCTURE = {
         **Reglas de Evaluación (Ítem 20):**
         {all_items_rules_detail}
 
-        Evalúa estrictamente basándote en la transcripción Y los DATOS DE K+ (k_plus_data_snapshot). Identifica si el agente discute o intenta dar de alta UN DATO *NUEVO* (dirección, teléfono, email, etc.) o si discute dar de alta un dato que POR OPERATIVA NO SE DEBE registrar (ej: teléfono de Comisaría). **CRUCIALMENTE, USA k_plus_data_snapshot para verificar si la acción de regi
+        Evalúa estrictamente basándote en la transcripción Y los DATOS DE K+ (k_plus_data_snapshot). Identifica si el agente discute o intenta dar de alta UN DATO *NUEVO* (dirección, teléfono, email, etc.) o si discute dar de alta un dato que POR OPERATIVA NO SE DEBE registrar (ej: teléfono de Comisaría). **CRUCIALMENTE, USA k_plus_data_snapshot para verificar si la acción de registro/actualización discutida parece haberse reflejado CORRECTAMENTE o INCORRECTAMENTE en el estado de K+ proporcionado.**
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "20",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación. Indica si se discutió o intentó dar de alta un dato nuevo y si parecía correcto en la conversación Y si el estado en k_plus_data_snapshot corrobora un registro correcto/incorrecto o falta de registro.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no se discute ningún alta o modificación de datos nuevos en la llamada.
+        """,
+    },
+    "item_26_individual": {
+         "item_ids": ["26"],
+          # Template para un ítem individual
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 26: Código Deontológico (Lenguaje y Comportamiento).
+
+        **Datos de la Llamada:**
+        Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+        Tipo de Llamada (obtenido de origen): {call_type}
+        # Ítem 26 no necesita datos de K+ por sus reglas actuales, pero se incluyen por consistencia si fuera necesario a futuro.
+        # Estado de Datos en K+ (post-llamada): {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 26):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción. Busca evidencia de lenguaje o comportamiento del agente que sea una **violación clara y grave** del código deontológico. Enfócate en la presencia de amenazas, intimidación, ironía (si es clara por texto), frases inadecuadas, provocaciones, juicios de valor, o cualquier expresión que pueda dañar gravemente la imagen de la compañía.
+
+        Ignora aspectos de comunicación general (volumen, silencios, escucha activa). Solo penaliza aquí si la violación es **grave**.
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "26",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando el tipo de violación detectada y citando la evidencia de la transcripción.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no hay evidencia de ninguna de estas violaciones graves.
+        """,
+    }
+}
 
 
 
