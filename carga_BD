@@ -1,0 +1,621 @@
+Ahora quiero que me ayudes a generar el json de metadada de cada uno de los archivos que pasan el filtro. Para ello habrá que conectarse a la base de datos de la empresa. Se accederá a un datawarehouse y en el se accederá a un módulo que es un mirror de las tablas más relevantes de la BD. esta base de datos es relacional. Entiendo que habrá que añadir un paso extra en main_workflow.py donde se generara el archivo de metadata para una llamada concreta, este paso debería de ir  antes del paso  # 5. Carga de Datos para Evaluación  (dentro de este paso se cargaba el archivo     metadata_filepath = os.path.join(k_plus_dir, f"{call_id}-metadata-{comm_id}.json") donde se leera el archivo generado).
+
+aquí te presento como se realizaría la conexión a la base de datos
+
+import oracledb
+
+user1 = 'REPORTING'
+password1 = 'xxxxxxxxxxxxxx'
+
+# Funcion conexión a oracle
+def conectar_a_oracle():
+    try:
+        params = oracledb.ConnectParams(host="172.31.14.161", port="1521", service_name="DWH")
+        conn_oracle = oracledb.connect(user=user1, password=password1, params=params)
+        return conn_oracle
+    except Exception as e:
+        print(f"Error al conectar a la base de datos Oracle: {str(e)}")
+        return None
+    
+conn = conectar_a_oracle()
+
+query_documents = '''
+SELECT * FROM REPORTING.GENESYS...
+'''
+A continuación te dire a cada tabla a la que tienes que acceder.
+
+
+# Conexion a la base de datos
+conn = conectar_a_oracle()
+# Creamos un data frame con el resultado
+df_documents = pd.read_sql(query_documents, con=conn)
+
+
+
+. Vale, hay que coger el conversation ID de cada llamada e ir a buscar en función de si la llamada es entrante o saliente, esto se haya dentro de la transcripción descargada. si es saliente (outbound), se buscará primero en la tabla dentro de reporting llamada  GENESYS_CALL_DETAILS, si no se haya ningún resultado, se procederá a buscar en la tabla GENESYS_CAMPAIGNS_FEEDBACK. Y para el caso de llamada entrante (inbound), se realizará únicamente una busqued en la tabla GENESYS_INBOUND_CALLS. El nombre de la columna en las 3 tablas será 'CONVERSATION_ID', si no se consigue extraer ningún resultado para un caso u otro, no se realizará el análisis sobre ella llamada. el motivo será conversation_id no encontrado en BD de kollecto.
+
+
+de la columna SUBSCRIBER_IDS (Tiene el mismo nombre en las tablas excepto en GENESYS_CAMPAIGNS_FEEDBACK, en esta será en singular SUBSCRIBER_ID)
+
+En los casos de SUBSCRIBER_IDS el valor de la columna no es un número (en SUBSCRIBER_ID en singular si que es un número). El tipo de dato es CLOB, en este caso, puede haber varios valores de subscribers y vendrán concatenados con comas (Ej: 13709225,13847305). Si solo hay uno se extrae como si fuera un SUBSCRIBER_ID, pero si hay mas de uno se descartará el análisis, en este caso el motivo será multiples subscribers para un conversation_id
+
+Una vez tengamos el SUBSCRIBER_ID, nos iremos a la tabla de REPORTING llamada SUBSCRIBERS
+ahí buscaremos con nuestro subscriber las columnas, FIRST_NAME y LAST_NAME que se almacenaran dentro de nombre y apellidos, si alguna de las dos columnas es null pues se ignora esa columna. Luego se cogerá la columna SSN que sera la info del del DNI/NIE, comprobar que el valor no sea 000000X (número indefinido de x), en estos casos se establece como no definido. Por último se recogerá el valor de la columna BIRTH_DATE, con este formato  = 1981-09-09 00:00:00.000, a la hora de guardarlo en nuesta variable, se omitirán las horas, minutos, segs evidentemente. Puede ser que no este vacía pero tenga un valor genérico como 1900-01-01 00:00:00.000, en este caso será equivalente a que no haya ninguna. Puede ser que haya más de una persona involucrada para un suscriber_id, asi que se cogerán los datos de todas las personas para la comparación potencial.
+
+en la tabla SUBSCRIBER_ADDRESSES, usando el SUBSCRIBER_ID, se cogerá las direcciones disponibles, puede haber varias para un mismo subscriber, se cogerán ambas y se usarán para la posible comparación. Las variables de dirección Se compondrán con las columnas de la tabla llamadas: STREET, CITY, DISTRICT y POSTAL_CODE para cada una de ellas
+
+y esto es la lógica que se aplicará al ítem 4 con esta info, esta lógica se complementa a la ya establecida anteriormente en el prompt:
+
+-	“Bloque Subscriber/Debtor” principalmente: 
+Llamadas entrantes (inbound): 
+- Si es uno de los Intervinientes: Nombre completo + SSN + Birth Date. Si Birth date vacío, entonces “adresses” (realmente solo se añade el matiz extra de si no hay fecha de nacimiento, preguntar el adress)
+
+- si es un Autorizado expresos (nueva lógica): se pedirán por un lado: el Nombre completo + SSN de este autorizado aunque no se corroborará con ningún dato proveniente de kollecto ya que quizá no esten disponbiles estos casos. Y por otro lado, se corroboran Los datos del interviniente del expediente: Nombre completo + SSN. 
+
+Llamadas salientes(outbound)  (misma instrucción que existía):
+•	Intervinientes: Nombre completo + SSN
+
+
+
+Datos de Kollecto que se usarán en el item 6.
+
+Se cogerán las fechas de igual manera que en el proceso anterior. pero en este caso solo se recogerán aquellas que tengan la columna 'VALID' con valor 2 o valor 0 y con 'LAST_UPDATE_DATE' < 6 meses y con valor de columna 'SOURCE' = 80.
+
+Se cogerán los telefonos asociados a ese susbcriber en la tabla 
+SUBSCRIBER_PHONES. Al igual que antes solo se tendrán en cuenta aquellos que tengan columna VALID = 2 o valor 0 y con LAST_UPDATE_DATE < 6 meses y con valor de columna 'SOURCE' = 80.
+ y se cogerá el valor de columna PHONE_NUMBER. 
+
+Lo mismo para buscar el mail. en la columna SUBSCRIBER_EMAILS coger la columna EMAILS con la misma condición que los anteriores (columna VALID,LAST_UPDATE_DATE Y SOURCE).
+
+
+Datos de kollecto que se usarán en el item 20
+
+Los mismo que en el item 20, pero unicamente aquellos que tengan VALID = 2. Es decir que se hayan actualizado a raíz de esa llamada correctamente. 
+
+Para caso de llamada entrante y el cliente no autorice a llamarle a ese número, se comprobará si ese dato se ha dado de alta correctamente en Kollecto. Para ellos se cruzará con los datos de kollecto de números de teléfono con VALID = 6 y SOURCE = 82 para ver si esta presente.
+
+
+ítem número 3.
+
+Se usan los datos extraídos de kollecto del ítem 4
+
+ítem número 5.
+
+- Se buscarán los siguientes campos:
+
+En primer lugar, a partir del subscriber_id se ira a la tabla de reporting ACC_SUBS_INT y con el SUBSCRIBER_ID se extraerá el valor de la columna ACCOUNT_ID (número entero). Con este ACCOUNT_ID nos iremos a la tabla DYNAMIC_FLAGS y se extraerá el valor de la columna FLAG_ID (numero entero). El flag_id que se busca en este caso es el 1501 (ARGUMENTARIO PRESCIPCION), tambien se coge de esta tabla la columna LAST_UPDATE_DATE. Si se encuentra entonces al menos una fila con FLAG_ID = 1501, se recogerá la variabel FLAG_ACTIVE = True. Si no se encuentra ningun resultado para el  ACCOUNT_ID o se encuentra pero no se encuentra un resultado con FLAG_ID = 1501, nos iremos a la tabla DYNAMIC_FLAGS_HIST, y buscaremos por el ACCOUNT_ID igualmente, si hay algun resultado con FLAG_ID = 1501, se marcará entonces el valor de FLAG_ACTIVE = False. 
+
+A continuación, nos iremos a la tabla FIN_ACC_BALANCE_RELATED_IDS, donde buscaremos en la columna RELATED_ID con nuestro valor de ACCOUNT_ID. De aqui sacaremos el resultado de FIN_ACCOUNT_BALANCE_ID, y nos iremos con este valor entero a la tabla FIN_ACCOUNT_BALANCES y buscaremos el ID en la columna correspondiente FIN_ACCOUNT_BALANCE_ID. De aqui extraeremos el valor de la columna AMOUNT_TO_PAY y lo almacenaremos en una variable llamada importe deuda y el valor de PORTFOLIO_ID Y FIN_CLIENT_PRODUCT_ID.
+
+Con PORTFOLIO_ID nos iremos ala tabla PORTFOLIOS y buscaremos la columna NAME asociada a ese PORTFOLIO_ID y la alamcenaremos en la variable PORTFOLIO o cedente.
+
+Con FIN_CLIENT_PRODUCT_ID nos iremos a la tabla FIN_CLIENT_PRODUCT_ID Y extraeremos el valor de FIN_FINANCIAL_PRODUCT_ID, y nos iremos a la tabla FIN_FINANCIAL_PRODUCTS y extraeremos la columna NAME con ese FIN_FINANCIAL_PRODUCT_ID. este name lo almacenaremos en la variable Producto. 
+
+La lógica a aplicar adicional al prompt inicial es la siguiente.
+
+
+•	Si flag activa y fecha < 3 meses => NO corresponde realizar prescripción, solo identificar motivo llamada con producto + cedente + importe deuda.
+•	Si flag no activa o activa pero > 3 meses => Sí corresponde realizar prescripción. En este caso los campos son: producto + cedente + importe deuda. 
+
+
+ítem número 7.
+
+se usarán los datos de direcciones, teléfono y emails con VALID=2, al igual que en el ítem 20. Para este ítem se revisa que se deben solicitar adicionales si estos campos están vacíos, o en el caso de tlf y mail, también si solo tenemos 1.
+
+
+
+A continuación te adjunto también el item_rules hasta ahora, dime si tendría sentido dada la complejidad añadida separar los items del primer paquete y lanzar una consulta por cada uno de ellos para facilitar la tarea al modelo (en este caso usamos el gpt 3.5 turbo):
+
+# Este archivo contiene la definición de las reglas de evaluación
+# y la estructura que define cómo se agrupan los ítems para la evaluación LLM.
+
+# --- Definición de Items y sus reglas (completo para los 10 ítems en scope) ---
+# COPIA AQUÍ EL CONTENIDO DEL DICCIONARIO 'ITEM_RULES' DEL PASO ANTERIOR
+# Asegúrate de que las reglas hagan referencia explícita a los campos
+# dentro de 'k_plus_data_snapshot' cuando sea necesario.
+ITEM_RULES = {
+    "1": { "name": "Saludo+Identificación (agente+empresa)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+            - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+            - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+            - Excepciones y otras consideraciones: Si agente solo indica su nombre, se acepta. Si frase en diferente orden, se acepta.
+            - Relación con otros ítems: Sin relación directa.
+            """},
+          # ... COPIA AQUÍ LAS REGLAS PARA LOS ITEMS 2, 3, 4, 5, 6, 7, 17, 20, 26
+    "2": { "name": "Informar posible grabación llamada + GDPR", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Informar siguiendo argumentario en TODAS llamadas salientes (incl. callback). RedSys: informar parar/reanudar grabación. Añadir persona: identificarse e informar grabación.
+            - Excepciones: Cliente interrumpe, no se valora (Pass). Frase no exacta pero informa, correcto (Pass). Empresas autorizadas con NDA, no es necesario informar (Pass/N/A si aplica).
+            - Relación con otros ítems: Sin relación directa.
+            """},
+    "3": { "name": "Identificación interlocutor (buscar confirmación)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Agente debe buscar confirmación de que habla con la persona correcta (cliente).
+            - Llamadas IN: Solicitar interlocutor facilite nombre y motivo. Si es cliente, pedir Nombre Completo, DNI, Fecha Nacimiento.
+            - Llamadas OUT: Preguntar por interviniente con Nombre y Apellidos. Debe responder afirmativamente a "¿Es usted?". No basta con "Sí", "Dígame".
+            - Excepciones: Interlocutor en llamada IN referencia su deuda ("llamo por mi tarjeta"), NO necesario el check "¿es usted?" (Pass). Llamada IN: agente pide datos ANTES de saber si es cliente, penaliza. Llamada IN: agente lee nombre SIN solicitar interlocutor lo facilite, penaliza. Penalizar solicitar 3 últimos dígitos DNI SIN negativa previa a confirmar completo (relacionado con Ítem 4, pero penaliza aquí).
+            - Relación con otros ítems: Sin relación directa.
+            """},
+          # ASEGÚRATE DE ADAPTAR LAS REGLAS PARA REFERENCIAR LOS DATOS DE K+ (k_plus_data_snapshot)
+    "4": { "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Evalúa correcta identificación (Nombre Completo, DNI/NIE, Fecha Nacimiento) según tipo llamada.
+           - Llamadas Salientes: Nombre completo Y DNI/NIE completo.
+           - Llamadas Entrantes: Nombre completo + DNI/NIE completo + fecha nacimiento.
+           - Excepciones: NO informar motivo antes identificar. Solo 3 últimos DNI si NEGATIVA previa. Si **Fecha Nacimiento NO en k_plus_data_snapshot** Y valida por dirección (comparar con **k_plus_data_snapshot.direccion_valido**), correcto. IN por SMS/perdida donde agente da nombre: Válido si sigue resto (pide DNI/DOB). Autorizados sin DNI/NIE: Válido si facilitan cedente/producto/ref (comparar con **k_plus_data_snapshot.datos_contractuales**).
+           - Relación con Ítem 17: Si info contractual a NO interviniente (Ítem 4 Fail por persona incorrecta), fallo principal en Ítem 17.
+           """},
+    "5": { "name": "Motivo llamada-identificar expediente. Prescripción", "complexity": "MEDIO", "description": "...",
+           "rules_detail": """
+           Manejo correcto de información de prescripción o productos/cedente/importes.
+           - Si aplica prescripción: fiel al texto facilitado y datos (fechas/importes) correctos.
+           - Si NO procede prescripción (flag < 3 meses o no hay flag): informar productos, cedente, importes.
+           - Si expediente NO tiene flag O flag > 3 meses Y hace prescripción: DEBE mencionar que registrará flag.
+           - Penalizar datos erróneos (cedente, producto, importe, fecha formalización).
+           - Si error corregido MÁS TARDE: NO penaliza (Pass).
+           - Excepciones: Al hacer prescripción NO indica tipo interviniente ("usted tiene un préstamo") pero es cliente principal (ej. cliente dice "tengo una tarjeta" y es único): NO penaliza (Pass).
+           - Relación con Ítem 14: Si datos erróneos en prescripción y error mantenido, penalización en Ítem 5, NO Ítem 14.
+           """},
+    "6": { "name": "Confirmar datos contacto (dirección, teléfono, email)", "complexity": "MEDIO", "description": "...",
+            "rules_detail": """
+            Valora si se confirman COMPLETOS todos los datos de contacto marcados "VALIDO" en K+.
+            - Válido SÓLO si se confirman, de manera COMPLETA, TODOS los datos de contacto "VALIDO" listados en **k_plus_data_snapshot (direccion_valido, telefonos_validos, emails_validos)** en la transcripción.
+            - EXCEPCIONES (gestionadas en código, LLM no evalúa si aplica): NO valora llamadas < 4 minutos. NO valora si incidencias K+ reportadas.
+            - Relación con Ítem 21: ... (mismas reglas, adaptadas si referencian K+ state)...
+            - Relación con Ítem 7: Solicitar datos adicionales DESPUÉS de confirmar datos sistema -> Ítem 7, NO Ítem 6.
+            """},
+    "7": { "name": "Solicitar datos contacto adicionales", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si se solicitan datos de contacto adicionales (teléfono, mail) cuando corresponde.
+            - Solicitar datos adicionales (telf fijo/móvil, email si no tenemos uno) en todas confirmaciones y/o actualizaciones.
+            - SOLO se valora la SOLICITUD, no la correcta incorporación a BBDD (eso es Ítem 20).
+            - Excepciones (N/A o Pass si aplica): NO valora si ya dispone de >1 teléfono Y >1 email. NO valora si NO corresponde confirmación/actualización datos. Operativa NO aplica para autorizados expresos.
+            - Relación con Ítem 20: Correcta incorporación a BBDD -> Ítem 20. Este ítem es SOLO sobre la SOLICITUD.
+            """},
+    # Ítems Críticos Individuales
+    "17": { "name": "Tratamiento de la información con 3os", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Protección de información personal/contractual, evitando facilitarla a personas NO autorizadas.
+            - Penaliza facilitar info a NO autorizados.
+            - EXCEPCIONES (N/A si aplica): Si interviniente ESTÁ presente en llamada a 3. Si abogados personados en K+, NO necesita autorización (Pass).
+            - Relación con otros ítems: Sin relación directa relevante.
+            """},
+    "20": { "name": "Alta / Asignación datos (dirección teléfonos, etc.)", "complexity": "BAJO", "description": "...",
+            "rules_detail": """
+            Evalúa si el agente habla de dar de alta un dato nuevo necesario, o si discute un dato que NO debe darse de alta, **Y si la evidencia en k_plus_data_snapshot sugiere que la acción se realizó correctamente o incorrectamente si se discutió en la llamada.**
+            - Penaliza cuando se habla de dar de alta dato nuevo necesario que NO SE HACE (según conv.) O se habla de dar de alta dato que POR OPERATIVA NO DEBE incorporarse (ej. Comisaría). **VERIFICAR en k_plus_data_snapshot los campos relevantes de estado de registro (ej. estado_registro_direccion_nueva_hablada_en_call, estado_registro_telefono_nuevo_hablado_en_call) para ver si el dato fue registrado y si el estado indica error o no registro cuando debía.**
+            - Si discute alta dato nuevo con error evidente en conv. (ej. CP erróneo), penaliza, **y si el estado en k_plus_data_snapshot confirma un registro erróneo.**
+            - Relación con Ítem 21: ... (mismas reglas, adaptadas si referencian K+ state)...
+            """},
+    "26": { "name": "Ninguna amenaza o intimidación, ironía, frases inadecuadas. Sin provocaciones, sin juicios de valor", "complexity": "ALTO", "description": "...",
+            "rules_detail": """
+            Agente mantiene comportamiento respetuoso, profesional, SIN dañar imagen compañía.
+            - Evitar: NINGUNA amenaza/intimidación, NINGUNA ironía, NINGUNA frase inadecuada, SIN provocaciones, SIN juicios de valor. Enfócate en violaciones CLARAS Y GRAVES que dañan la imagen.
+            - Relación con Ítem 23 (Comunicación general): Mayoría problemas tono/comunicación penalizan Ítem 23. SOLO Ítem 26 si acción/lenguaje DAÑA CLARAMENTE IMAGEN o trato CRITICAMENTE INAPROPIADO/IRRESPECTUOSO según puntos listados.
+            """},
+    # ... COPIA LAS REGLAS RESTANTES ADAPTADAS ...
+}
+
+
+# --- Estructura de Evaluación (Define grupos e ítems individuales) ---
+# Esta estructura define QUÉ se evalúa en CADA llamada al LLM.
+EVALUATION_STRUCTURE = {
+    "inicio_llamada_group": {
+        "item_ids": ["1", "2", "3", "4", "5", "6", "7"],
+        # Template para un grupo de ítems
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos proporcionados para determinar si el agente cumplió con los siguientes ítems del bloque "Inicio Llamada": {item_ids}.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Duración (mins): {call_duration}
+        Incidencia en K+ Reportada: {k_plus_incident}
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+        Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+
+        **Reglas de Evaluación para cada Ítem:**
+        {all_items_rules_detail}
+
+        Evalúa cada uno de los ítems listados ({item_ids}) estrictamente basándote en la transcripción, los DATOS DE K+ (k_plus_data_snapshot) y las reglas proporcionadas para CADA ÍTEM. Para el Ítem 6, ten en cuenta las excepciones por duración o incidencia.
+
+        Formato de Salida: Devuelve una lista de objetos JSON, uno por cada ítem evaluado en este grupo. CADA objeto JSON debe tener las claves "item_id", "result" ("Pass" | "Fail" | "N/A"), "reason" (explicación breve, citando evidencia de transcripción O datos de K+) y "transcript_segment" (fragmento relevante).
+
+        ```json
+        [
+          {{
+            "item_id": "1",
+            "result": "Pass" | "Fail" | "N/A",
+            "reason": "...",
+            "transcript_segment": "..."
+          }},
+          # ... y así para todos los ítems del grupo (2, 3, 4, 5, 6, 7)
+        ]
+        ```
+        Asegúrate de que la salida sea una lista de objetos JSON válida.
+        """,
+    },
+    "item_17_individual": {
+        "item_ids": ["17"],
+         # Template para un ítem individual
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y datos para evaluar el Ítem 17: Tratamiento de la Información con Terceros.
+
+        **Datos de la Llamada:**
+        Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 17):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción y los DATOS DE K+ (k_plus_data_snapshot). Enfócate en si se reveló información personal o contractual a alguien que no debía recibirla, considerando las excepciones basadas en k_plus_data_snapshot.abogado_personado o si el interviniente estaba presente en llamada a 3 (según los datos).
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "17",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando si se facilitó información a un tercero no autorizado o no, citando evidencia de transcripción O datos de K+.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca N/A si la regla de excepción aplica según los datos.
+        """,
+    },
+     "item_20_individual": {
+         "item_ids": ["20"],
+          # Template para un ítem individual
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción y los datos proporcionados para determinar si el agente cumplió con el Ítem 20: Discusión/Intento de Alta/Asignación de Datos Nuevos.
+
+        **Datos de la Llamada:**
+        Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+        **Estado de Datos en K+ (post-llamada):** {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 20):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción Y los DATOS DE K+ (k_plus_data_snapshot). Identifica si el agente discute o intenta dar de alta UN DATO *NUEVO* (dirección, teléfono, email, etc.) o si discute dar de alta un dato que POR OPERATIVA NO SE DEBE registrar (ej: teléfono de Comisaría). **CRUCIALMENTE, USA k_plus_data_snapshot para verificar si la acción de registro/actualización discutida parece haberse reflejado CORRECTAMENTE o INCORRECTAMENTE en el estado de K+ proporcionado.**
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "20",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación. Indica si se discutió o intentó dar de alta un dato nuevo y si parecía correcto en la conversación Y si el estado en k_plus_data_snapshot corrobora un registro correcto/incorrecto o falta de registro.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no se discute ningún alta o modificación de datos nuevos en la llamada.
+        """,
+    },
+    "item_26_individual": {
+         "item_ids": ["26"],
+          # Template para un ítem individual
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 26: Código Deontológico (Lenguaje y Comportamiento).
+
+        **Datos de la Llamada:**
+        Transcripción, con cada línea etiquetada como [A] (Agente) o [I] (Interlocutor): ```{transcript}```
+        # Ítem 26 no necesita datos de K+ por sus reglas actuales, pero se incluyen por consistencia si fuera necesario a futuro.
+        # Estado de Datos en K+ (post-llamada): {k_plus_data_snapshot}
+
+        **Reglas de Evaluación (Ítem 26):**
+        {all_items_rules_detail}
+
+        Evalúa estrictamente basándote en la transcripción. Busca evidencia de lenguaje o comportamiento del agente que sea una **violación clara y grave** del código deontológico. Enfócate en la presencia de amenazas, intimidación, ironía (si es clara por texto), frases inadecuadas, provocaciones, juicios de valor, o cualquier expresión que pueda dañar gravemente la imagen de la compañía.
+
+        Ignora aspectos de comunicación general (volumen, silencios, escucha activa). Solo penaliza aquí si la violación es **grave**.
+
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "26",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, indicando el tipo de violación detectada y citando la evidencia de la transcripción.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca como N/A si no hay evidencia de ninguna de estas violaciones graves.
+        """,
+    }
+}
+
+# Las reglas detalladas de los ítems (ITEM_RULES) deben referenciar ahora
+# explícitamente los campos dentro del diccionario k_plus_data_snapshot
+# que se pasa en el prompt_data.
+# Por ejemplo, en ITEM_RULES["4"]["rules_detail"], en lugar de "Si fecha nacimiento no está en sistema",
+# ahora podrías poner "Si k_plus_data_snapshot.fecha_nacimiento está vacío o es nulo".
+# DEBES IR ITEM POR ITEM Y ADAPTAR LA REDACCIÓN DE LAS REGLAS EN ITEM_RULES
+# PARA INDICAR AL LLM CUANDO DEBE MIRAR LOS DATOS DE K+.
+# ITEM RULES DEL 1 AL 7 separados
+'''
+# --- Definición de Items y sus reglas ---
+# Añadimos los ítems 1, 2, 3, 5, 7 a los ítems críticos existentes
+ITEM_RULES = {
+    # Bloque 1: Inicio Llamada
+    "1": {
+        "name": "Saludo+Identificación (agente+empresa)",
+        "complexity": "BAJO",
+        "description": "Evalúa que el saludo y la identificación del agente sigan las pautas de la empresa.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 1: Saludo e Identificación (agente+empresa).
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 1):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "1",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación de por qué Pass, Fail o N/A, citando evidencia de la transcripción.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        Se valora que el saludo y la identificación del agente sean las establecidas por la empresa.
+        - Llamadas Salientes: Agente debe presentarse con Nombre + 1 Apellido e indicar que llama de EOS Spain.
+        - Llamadas Entrantes: Ajustarse a frase “EOS Spain buenos días/tardes le atiende nombre +er apellido, ¿en qué puedo ayudarle?”
+        - Excepciones y otras consideraciones:
+          - Si agente solo indica su nombre, se acepta como correcto.
+          - Si se dice la frase pero diferente orden (sin alterar sentido), se acepta como correcto.
+        - Relación con otros ítems: Sin relación directa.
+        """
+    },
+    "2": {
+        "name": "Informar posible grabación llamada + GDPR",
+        "complexity": "BAJO",
+        "description": "Evalúa si se informa sobre la grabación y GDPR en llamadas salientes, callbacks, y situaciones específicas (RedSys, añadir persona).",
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 2: Información sobre Grabación y GDPR.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 2):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "2",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se informó o no, y si cumplió las reglas/excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Marca N/A para llamadas entrantes regulares donde no aplica.
+        """,
+        "rules_detail": """
+        - Informar siguiendo argumentario, en TODAS las llamadas salientes, incluidas callback.
+        - En pagos a través de RedSys es necesario informar cuando se va a parar la grabación y también cuando se reanuda.
+        - Cuando otra persona se añada a la conversación debemos identificarnos e informar de la grabación.
+        - Excepciones y otras consideraciones:
+          - Si el cliente interrumpe mientras está informando, no se valora (Pass).
+          - Se informa de la grabación y la política de privacidad, pero no con la frase exacta, se daría como correcto (Pass).
+          - Con empresas autorizadas con NDA no es necesario informar de grabación (Pass si es el caso, aunque no puedes verificar NDA solo con transcripción - asume Pass si se menciona "empresa autorizada" y no se informa, o marca N/A si los metadatos indican empresa con NDA).
+        - Relación con otros ítems: Sin relación directa.
+        """
+    },
+    "3": {
+        "name": "Identificación interlocutor (buscar confirmación)",
+        "complexity": "BAJO",
+        "description": "Evalúa si el agente busca la confirmación de que habla con la persona correcta, según tipo de llamada.",
+         "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 3: Identificación del Interlocutor (buscar confirmación).
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+
+        **Reglas de Evaluación (Ítem 3):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y el tipo de llamada. El objetivo es ver si el agente VERIFICÓ que la persona que respondió es la que busca.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "3",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se buscó la confirmación correctamente o no, según reglas y excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        Se valora que el agente busque una confirmación de que está hablando con la persona por la que pregunta / cliente.
+        - Llamadas IN: Se debe solicitar que sea el interlocutor quien facilite su nombre y motivo. Si es cliente, pedir Nombre Completo, DNI y Fecha Nacimiento.
+        - Llamadas OUT: Se debe preguntar por interviniente con Nombre y Apellidos, y verificar que la persona RESPONDE afirmativamente a "¿Es usted?". No basta con "Sí", "Dígame", etc.
+        - Excepciones y otras consideraciones:
+          - Si el interlocutor en llamada IN referencia su deuda ("llamo por mi tarjeta"), NO es necesario el check "¿es usted?" (Pass).
+          - Llamadas IN: Si agente solicita nombre, apellidos, DNI ANTES de saber si es cliente, se penaliza.
+          - Llamadas IN: Si agente lee nombre/apellidos SIN antes solicitar que lo facilite el interlocutor, se penaliza.
+          - Penalizar solicitar 3 últimos dígitos DNI SIN negativa previa a confirmar completo (esto está relacionado con Ítem 4, pero la regla indica penalizar aquí si la falta inicial de pedir el completo ocurre sin negativa previa).
+        - Relación con otros ítems: Sin relación directa (la penalización de los 3 últimos DNI es una excepción dentro de este ítem, no una relación de dependencia de resultado con Ítem 4).
+        """
+    },
+    "4": { # Ítem crítico - Mantenemos la definición anterior
+        "name": "Nombre completo Interviniente, DNI/NIF, Fecha nacimiento",
+        "complexity": "MEDIO",
+        "description": "Evalúa la correcta identificación del interviniente según tipo de llamada (entrante/saliente), DNI/NIE, fecha nacimiento, excepciones.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 4: Identificación del Interviniente.
+
+        **Datos de la Llamada:**
+        Tipo de Llamada: {call_type}
+        Transcripción: ```{transcript}```
+        Datos K+ Relevantes (si aplica, ej: ¿DOB en sistema?): {k_plus_data}
+
+        **Reglas de Evaluación (Ítem 4):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados. Ignora cualquier otra consideración no especificada en las reglas.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "4",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación de por qué Pass, Fail o N/A, citando evidencia de la transcripción si es posible.",
+          "transcript_segment": "Fragmento relevante de la transcripción (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido y contenga solo el objeto JSON.
+        """,
+        "rules_detail": """
+        - Llamadas Salientes: Confirmar nombre completo Y facilitar DNI/NIE completo.
+        - Llamadas Entrantes: Confirmar nombre completo + DNI/NIE completo + fecha de nacimiento.
+        - Excepciones:
+          - NO informar motivo antes de confirmar identidad.
+          - Solo solicitar 3 últimos dígitos DNI/NIE si hay negativa previa a darlo completo (la penalización por pedir 3 últimos SIN negativa previa va en Ítem 3). Aquí se valora si la excepción se aplicó correctamente DESPUÉS de una negativa.
+          - Si fecha nacimiento no está en sistema y validan por dirección, se considera correcto (necesitas saber si fecha nacimiento NO estaba en sistema - usa k_plus_data).
+          - Llamadas entrantes por SMS/perdida donde agente da nombre: Válido si sigue resto de indicaciones (ej: pide DNI/fecha nacimiento).
+          - Autorizados sin DNI/NIE: Válido si facilitan empresa cedente/producto/referencia contrato.
+        - Relación con Ítem 17: Si se da información contractual a un NO interviniente, el fallo principal se valora en Ítem 17. Considera si la falla de identificación en Ítem 4 llevó a una situación de Ítem 17, pero enfócate en si la *identificación en sí misma* cumplió las reglas de este ítem.
+        """
+    },
+     "5": {
+        "name": "Motivo llamada-identificar expediente. Prescripción",
+        "complexity": "MEDIO",
+        "description": "Evalúa si se maneja la información de prescripción o productos/cedente/importes correctamente al inicio de la llamada.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 5: Motivo llamada - Identificar Expediente / Prescripción.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        ¿El expediente tiene flag de Argumentario Prescripción?: {has_prescription_flag}
+        Fecha de la flag de Prescripción (si existe): {prescription_flag_date} (considera "reciente" si < 3 meses desde hoy)
+
+        **Reglas de Evaluación (Ítem 5):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos sobre la flag de prescripción.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "5",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se aplicó/informó prescripción o datos correctamente, si hubo errores, si se corrigieron).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        - La prescripción (si aplica) debe ajustarse fielmente al texto facilitado y con datos (fechas/importes) correctos.
+        - Si NO procede prescripción (porque flag < 3 meses o no hay flag), se debe informar de productos, cedente e importes.
+        - Si expediente NO tiene flag O flag > 3 meses Y se realiza la prescripción, se DEBE mencionar que se registrará la flag (aunque no puedes verificar el registro real).
+        - Penalizar si se facilitan datos erróneos (cedente, producto, importe, fecha formalización).
+        - Si se facilitan datos erróneos Y el agente lo corrige MÁS TARDE en la conversación, NO se penaliza (Pass si se corrigió).
+        - Excepciones y otras consideraciones:
+          - Si al hacer prescripción NO se indica el tipo de interviniente (ej: "usted tiene un préstamo") pero queda claro que es el cliente principal (ej: cliente dice "tengo una tarjeta" y es único cliente), NO se penaliza (Pass).
+        - Relación con Ítem 14: Si se facilitan datos erróneos en la prescripción y el error se mantiene (no se corrige), la penalización va en este ítem (5), NO en Ítem 14. Tu tarea es identificar el error y si se corrigió DENTRO de esta llamada.
+        """
+    },
+    "6": { # Ítem crítico - Mantenemos la definición anterior
+        "name": "Confirmar datos contacto (dirección, teléfono, email)",
+        "complexity": "MEDIO",
+        "description": "Valora si se confirman COMPLETOS todos los datos de contacto 'VALIDO' de K+.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 6: Confirmación de Datos de Contacto.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        Datos de Contacto 'VALIDO' en K+: {k_plus_valid_contacts}
+        Duración de la Llamada (gestionada por código, ignora si la lógica previa lo marcó como N/A): {call_duration} minutos
+        Incidencia en K+ (gestionada por código, ignora si la lógica previa lo marcó como N/A): {k_plus_incident}
+
+        **Reglas de Evaluación (Ítem 6):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "6",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación, citando si se confirmaron TODOS los datos 'VALIDO' o no, o por qué es N/A.",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido. Si la lógica previa en el código ya marcó como N/A por duración o incidencia, tu tarea no se ejecutará para este ítem.
+        """,
+        "rules_detail": """
+        - Válido SÓLO si se confirman, de manera COMPLETA, TODOS los datos de contacto marcados como "VALIDO" en K+.
+        - EXCEPCIONES (gestionadas en código, no evalúes si aplica): No se valora en llamadas < 4 minutos. No se valora si hay incidencias de K+ reportadas.
+        - Relación con Ítem 21: Si por operativa NO toca confirmar datos pero se hace de forma incompleta, o si hay un envío SMS/Mail y se confirma solo el telf/mail usado dejando otros sin confirmar, se evaluaría en Ítem 21, NO en Ítem 6. Si hay envío SMS/Mail y no se confirman datos pero YA se confirmaron el último mes, se valora en Ítem 21. Si identificas una de estas situaciones en la transcripción (confirmación incompleta de datos 'VALIDO' existentes cuando SÍ tocaba confirmar), marca como Fail en Ítem 6 y en la razón indica la situación.
+        - Relación con Ítem 7: Solicitar datos adicionales (teléfono y mail) *después* de confirmar datos del sistema se valora en Ítem 7, NO en Ítem 6. Asegúrate de que la evaluación sea solo sobre la confirmación de los datos *ya existentes* en K+ marcados como "VALIDO".
+        """
+    },
+    "7": {
+        "name": "Solicitar datos contacto adicionales",
+        "complexity": "BAJO",
+        "description": "Evalúa si se solicitan datos de contacto adicionales (teléfono, mail) cuando corresponde.",
+        "prompt_template": """
+        Eres un evaluador de calidad de llamadas experto para EOS Spain. Analiza la siguiente transcripción para determinar si el agente cumplió con el Ítem 7: Solicitar Datos de Contacto Adicionales.
+
+        **Datos de la Llamada:**
+        Transcripción: ```{transcript}```
+        Número de teléfonos existentes en K+: {k_plus_phone_count}
+        Número de emails existentes en K+: {k_plus_email_count}
+        ¿Corresponde confirmación y/o actualización de datos en esta llamada?: {corresponds_update}
+        ¿Es autorizado expreso?: {is_authorised_express}
+
+        **Reglas de Evaluación (Ítem 7):**
+        {item_rules}
+
+        Evalúa estrictamente basándote en la transcripción y los datos proporcionados. Busca la SOLICITUD activa por parte del agente de un teléfono (fijo o móvil) y/o un email ADICIONAL.
+        Formato de Salida (JSON):
+        ```json
+        {{
+          "item_id": "7",
+          "result": "Pass" | "Fail" | "N/A",
+          "reason": "Breve explicación (si se solicitó o no, y si correspondía hacerlo según reglas/excepciones).",
+          "transcript_segment": "Fragmento relevante (si aplica)"
+        }}
+        ```
+        Asegúrate de que la salida sea JSON válido.
+        """,
+        "rules_detail": """
+        - La solicitud de datos adicionales (teléfono fijo/móvil y email si no tenemos uno) debe hacerse en todas nuestras confirmaciones y/o actualizaciones de datos.
+        - En este ítem solo se valora la SOLICITUD, no si el dato se da o se registra correctamente.
+        - Excepciones y otras consideraciones (marca N/A o Pass si aplica):
+          - NO se valorará si ya disponemos de más de un teléfono Y más de un email de contacto (requiere k_plus_phone_count > 1 Y k_plus_email_count > 1).
+          - NO se valorará si NO corresponde confirmación y/o actualización de datos en esta llamada (requiere depends_on_update = False).
+          - La operativa NO aplica para autorizados
+'''
+
+
+y te recuerdo que teníamos un postprocessor.py, por si habría que añadir algo a esta parte:
+
+# Este archivo contiene la lógica de post-procesamiento para refinar los resultados del LLM.
+
+# Importar estructura de evaluación para saber qué ítems esperar
+from .item_rules import EVALUATION_STRUCTURE
+# Importar config_manager si la lógica de post-procesamiento necesita config
+from src.config import config_manager
+
+def apply_post_processing(initial_results: list[dict], call_metadata: dict) -> list[dict]:
+    """
+    Aplica lógica de post-procesamiento para manejar excepciones complejas
+    y relaciones entre ítems, usando los resultados iniciales del LLM y metadatos.
+
+    Args:
+        initial_results (list[dict]): Lista aplanada de resultados iniciales de CADA ítem.
+        call_metadata (dict): Metadatos de la llamada (incluyendo k_plus_data_snapshot).
+
+    Returns:
+        list[dict]: Lista de resultados finales ajustados.
+    """
+    ...
+
+    return final_results
